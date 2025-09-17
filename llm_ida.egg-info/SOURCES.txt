@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+setup.cfg
+app/__init__.py
+app/llm.py
+app/main.py
+app/model_runner.py
+app/model_selector.py
+app/vector_db.py
+llm_ida.egg-info/PKG-INFO
+llm_ida.egg-info/SOURCES.txt
+llm_ida.egg-info/dependency_links.txt
+llm_ida.egg-info/top_level.txt
+tests/test_cli_guard.py
+tests/test_llm.py
+tests/test_select_and_predict.py

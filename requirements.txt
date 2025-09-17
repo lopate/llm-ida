@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+transformers
+torch
+sktime
+tslearn
+torch-geometric
+pytest
