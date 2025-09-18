@@ -1,11 +1,15 @@
 import os
 import json
 from typing import List, Dict
+import re
 
 # Интеграция с локальным LLM через Hugging Face `transformers` (если задан HF_MODEL),
 # иначе используется rules-based fallback. Это даёт лёгкую локальную альтернативу OpenAI/Ollama.
 
-HF_MODEL = os.environ.get("HF_MODEL")
+# Default to a local Ollama-like model unless an environment variable explicitly overrides it.
+# Use os.environ membership test so an empty HF_MODEL environment value won't silently
+# fall back to the default if the user intentionally set an empty string.
+HF_MODEL = os.environ["HF_MODEL"] if "HF_MODEL" in os.environ else "TinyLlama/TinyLlama_v1.1"
 
 BASELINE_PROMPT = """
 You are an assistant that helps choose the most suitable spatial-temporal model for a dataset.
@@ -27,11 +31,17 @@ Choose a single best option from candidates and justify briefly.
 
 
 def build_prompt(dataset_desc: str, task: str, candidates: List[str]) -> str:
+    # We add explicit markers so the model is instructed to place the JSON between
+    # clear delimiters. This helps post-processing reliably extract JSON even when
+    # the model emits surrounding explanation text.
     prompt = BASELINE_PROMPT + "\nUser-provided info:\n"
     prompt += f"Dataset: {dataset_desc}\n"
     prompt += f"Task: {task}\n"
     prompt += "Candidates: " + ", ".join(candidates) + "\n"
-    prompt += "Please output only valid JSON as described."
+    prompt += (
+        "Please output only valid JSON as described, and place it between the markers "
+        "<<JSON>> and <</JSON>> with no additional JSON-like text outside these markers."
+    )
     return prompt
 
 
@@ -53,11 +63,41 @@ def call_transformers(prompt: str, model_name: str) -> Dict:
     # Выход может быть в поле 'generated_text' или 'text' в зависимости от версии
     text = out[0].get("generated_text") or out[0].get("text") or str(out[0])
 
-    try:
-        return json.loads(text)
-    except Exception:
-        # Если LLM не вернул чистый JSON, повернём ошибку для fallback'а
-        raise RuntimeError("Failed to parse JSON from local transformers output")
+    # Попробуем извлечь JSON между явными маркерами, если они есть
+    marker_match = re.search(r"<<JSON>>(.*?)<</JSON>>", text, flags=re.S)
+    if marker_match:
+        candidate = marker_match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except Exception:
+            # fall through to balanced extraction
+            pass
+
+    # Если маркеры не найдены или парсинг не удался, используем предыдущую попытку —
+    # поиск первой сбалансированной JSON-подстроки.
+    def _extract_balanced_json(s: str) -> str:
+        start = s.find('{')
+        if start == -1:
+            return ''
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == '{':
+                depth += 1
+            elif s[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    return s[start:i + 1]
+        return ''
+
+    candidate = _extract_balanced_json(text)
+    if candidate:
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    # Если всё ещё не получилось — вернём ошибку для fallback
+    raise RuntimeError("Failed to parse JSON from local transformers output")
 
 
 def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
