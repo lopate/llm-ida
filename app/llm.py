@@ -104,7 +104,7 @@ def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
     prompt = build_prompt(dataset_desc, task, candidates)
 
     # Если задан HF_MODEL — попробуем локальную модель через transformers.
-    if HF_MODEL:
+    if HF_MODEL and HF_MODEL != "fallback":
         try:
             return call_transformers(prompt, HF_MODEL)
         except Exception as e:
