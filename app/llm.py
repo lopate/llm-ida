@@ -6,10 +6,11 @@ import re
 # Интеграция с локальным LLM через Hugging Face `transformers` (если задан HF_MODEL),
 # иначе используется rules-based fallback. Это даёт лёгкую локальную альтернативу OpenAI/Ollama.
 
-# Default to a local Ollama-like model unless an environment variable explicitly overrides it.
-# Use os.environ membership test so an empty HF_MODEL environment value won't silently
-# fall back to the default if the user intentionally set an empty string.
-HF_MODEL = os.environ["HF_MODEL"] if "HF_MODEL" in os.environ else "TinyLlama/TinyLlama_v1.1"
+# Default behavior: use a rules-based fallback unless the user explicitly sets `HF_MODEL`.
+# This avoids attempting to load large transformer models in test environments where the
+# variable is not intentionally provided. If you want to use a local HF model set the
+# `HF_MODEL` environment variable to the model name (e.g. "TinyLlama/TinyLlama_v1.1").
+HF_MODEL = os.environ.get("HF_MODEL", "fallback")
 
 BASELINE_PROMPT = """
 You are an assistant that helps choose the most suitable spatial-temporal model for a dataset.
@@ -23,10 +24,10 @@ User will provide:
 - short description of dataset (spatial resolution, temporal frequency, number of sensors)
 - task (nowcasting/reconstruction/forecasting)
 - performance constraints (latency, memory)
+ 
+ Return a JSON with fields: model_choice, library, model_name (optional), model_args (optional dict), rationale, confidence (0-1).
 
-Return a JSON with fields: model_choice, library, rationale, confidence (0-1).
-
-Choose a single best option from candidates and justify briefly.
+ Choose a single best option from candidates and justify briefly. When possible include a concrete `model_name` (for example: "AutoARIMA", "AutoETS", "Naive", "RandomForestReduction") and small `model_args` specifying notable hyperparameters (e.g. {"n_estimators":50}).
 """
 
 
@@ -118,6 +119,8 @@ def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
         return {
             "model_choice": "Graph-based GNN (GCN/GAT)",
             "library": "torch_geometric",
+            "model_name": "GAT",
+            "model_args": {"layers": 2},
             "rationale": "Dataset appears to have graph structure or many sensors, GNNs model spatial relations well.",
             "confidence": 0.7,
         }
@@ -126,6 +129,8 @@ def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
         return {
             "model_choice": "Nowcasting (optical-flow / persistence)",
             "library": "pysteps",
+            "model_name": "persistence",
+            "model_args": {},
             "rationale": "Radar-based nowcasting algorithms like in PySTEPS are tailored for this task.",
             "confidence": 0.8,
         }
@@ -134,6 +139,8 @@ def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
         return {
             "model_choice": "Distance-based / clustering",
             "library": "tslearn",
+            "model_name": "KShape",
+            "model_args": {"n_clusters": 8},
             "rationale": "Shape-based similarity and clustering methods are provided by tslearn.",
             "confidence": 0.6,
         }
@@ -142,6 +149,8 @@ def select_model(dataset_desc: str, task: str, candidates: List[str]) -> Dict:
     return {
         "model_choice": "Classical time-series or ML estimator",
         "library": "sktime",
+        "model_name": "AutoARIMA",
+        "model_args": {},
         "rationale": "sktime provides a broad set of forecasting and classical methods as a good baseline.",
         "confidence": 0.5,
     }
