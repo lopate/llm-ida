@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  run-tests:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -33,6 +33,30 @@ jobs:
         run: |
           python -m pip install -e .
 
-      - name: Run tests
+      - name: Run unit tests
         run: |
-          pytest -q
+          pytest -q tests/unit
+
+      - name: Run vector_db tests
+        run: |
+          pytest -q tests/vector_db
+
+      - name: Run tslearn tests
+        run: |
+          pytest -q tests/tslearn
+
+      - name: Run model_runner tests
+        run: |
+          pytest -q tests/model_runner
+
+      - name: Run llm tests
+        run: |
+          pytest -q tests/llm
+
+      - name: Run torch tests
+        run: |
+          pytest -q tests/torch
+
+      - name: Run integration tests (if any)
+        run: |
+          if [ -d tests/integration ]; then pytest -q tests/integration; else echo 'No integration tests'; fi
