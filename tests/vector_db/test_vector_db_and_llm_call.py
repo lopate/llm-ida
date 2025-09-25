@@ -1,6 +1,6 @@
-from app import vector_db
+from app.vector_db import VectorDB
 
 
 def test_vector_db_and_llm_call_smoke():
-    # simple smoke to ensure module import
-    assert hasattr(vector_db, '_text_to_embedding')
+    # ensure VectorDB class is importable
+    assert hasattr(VectorDB, 'text_to_embedding')

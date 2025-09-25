@@ -5,7 +5,7 @@ import ast
 from typing import List, Dict, Tuple, Union, Any
 import re
 from typing import Any
-from app import vector_db
+from app.vector_db import VectorDB
 from app.model_runner import ModelCandidate, ModelChoice
 
 # Интеграция с локальным LLM через Hugging Face `transformers` (если задан HF_MODEL),
@@ -333,12 +333,18 @@ def select_model_rag(dataset_desc: str, task: str, db: Any = None, top_k: int = 
       field which will be included in the prompt for final selection.
     """
     # best-effort initialize DB
-    # use provided db or default module vector_db
-    db_client = db or vector_db
-    try:
-        db_client.initialize()
-    except Exception:
-        pass
+    # accept only VectorDB instances or None — do not rely on legacy module wrappers
+    if db is None:
+        db_client = VectorDB(backend='memory')
+    elif isinstance(db, VectorDB):
+        db_client = db
+    else:
+        # if a non-VectorDB object is provided, ignore it and create a transient DB
+        db_client = VectorDB(backend='memory')
+        try:
+            db_client.initialize()
+        except Exception:
+            pass
 
     query_text = f"{dataset_desc} | task: {task}"
     docs = []

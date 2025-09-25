@@ -200,6 +200,18 @@ class VectorDB:
         if self._backend == 'faiss' and isinstance(self._client, dict) and 'index' in self._client:
             try:
                 import numpy as np
+                # ensure an index exists; if it's None, try to create one from available faiss classes
+                if self._client.get('index') is None:
+                    try:
+                        import faiss  # type: ignore
+                        dim = int(len(embeddings[0]) if embeddings and len(embeddings[0]) else 128)
+                        idx_cls = getattr(faiss, 'IndexFlatL2', None) or getattr(faiss, 'IndexFlatIP', None) or getattr(faiss, 'IndexFlat', None)
+                        if idx_cls is None:
+                            raise RuntimeError('No suitable FAISS index class found')
+                        index = idx_cls(dim)
+                        self._client['index'] = index
+                    except Exception:
+                        return False
                 arr = np.array(embeddings, dtype='float32')
                 self._client['index'].add(arr)
                 self._client.setdefault('metadatas', []).extend(metadatas)
@@ -276,74 +288,57 @@ class VectorDB:
 
     def save(self, path: str):
         if self._backend == 'faiss' and isinstance(self._client, dict) and 'index' in self._client:
-            try:
-                import faiss
-                idx_path = path + '.index'
-                meta_path = path + '.meta.json'
-                faiss.write_index(self._client['index'], idx_path)
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    json.dump(self._client.get('metadatas', []), f, ensure_ascii=False)
-                return idx_path, meta_path
-            except Exception as e:
-                raise RuntimeError(f'Failed to save faiss index: {e}')
-        raise RuntimeError('Save not supported for backend: ' + str(self._backend))
+            import faiss
+            idx_path = path + '.index'
+            meta_path = path + '.meta.json'
+            faiss.write_index(self._client['index'], idx_path)
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(self._client.get('metadatas', []), f, ensure_ascii=False)
+            return idx_path, meta_path
 
     def load(self, path: str):
         if self._backend == 'faiss':
-            try:
-                import faiss
-                idx_path = path + '.index'
-                meta_path = path + '.meta.json'
-                if not (os.path.exists(idx_path) and os.path.exists(meta_path)):
-                    raise FileNotFoundError('FAISS index or metadata not found at path')
-                index = faiss.read_index(idx_path)
-                with open(meta_path, 'r', encoding='utf-8') as f:
-                    metadatas = json.load(f)
-                self._client = {'index': index, 'metadatas': metadatas}
-                self._faiss_index_path = path
-                return True
-            except Exception as e:
-                raise RuntimeError(f'Failed to load faiss index: {e}')
-        raise RuntimeError('Load not supported for backend: ' + str(self._backend))
+            import faiss
+            idx_path = path + '.index'
+            meta_path = path + '.meta.json'
+            if not (os.path.exists(idx_path) and os.path.exists(meta_path)):
+                raise FileNotFoundError('FAISS index or metadata not found at path')
+            index = faiss.read_index(idx_path)
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                metadatas = json.load(f)
+            self._client = {'index': index, 'metadatas': metadatas}
+            self._faiss_index_path = path
+
+    # Public helpers to avoid external code mutating private attributes directly
+    def set_backend(self, backend: Optional[str]):
+        """Set the backend type for this instance. Use initialize() to (re)create client state."""
+        self._backend = backend
+
+    def set_client(self, client: Any):
+        """Directly set the underlying client/state for advanced tests or integrations.
+
+        Prefer initialize()/upsert/query for normal usage.
+        """
+        self._client = client
+
+    def set_faiss_options(self, path: Optional[str], autosave: bool = False):
+        self._faiss_index_path = path
+        self._faiss_autosave = autosave
+
+    def reset_st_model(self):
+        """Clear cached sentence-transformers state so it will be lazily reloaded.
+
+        Tests should call this instead of poking `_st_model`/`_st_encoder_dim`.
+        """
+        self._st_model = None
+        self._st_encoder_dim = None
+
+    # Public wrapper for the internal embedding helper (preferred over _text_to_embedding)
+    def text_to_embedding(self, text: Optional[str], dim: int = 128) -> List[float]:
+        return self._text_to_embedding(text, dim)
 
 
-# Module-level default instance to preserve older call sites that expect
-# functions like `seed_default_models()` and `search_by_text()` at module scope.
-default_db = VectorDB()
-
-
-# Backwards-compatible wrapper functions ----------------------------------
-def initialize(*args, **kwargs):
-    return default_db.initialize(*args, **kwargs)
-
-
-def available():
-    return default_db.available()
-
-
-def upsert(*args, **kwargs):
-    return default_db.upsert(*args, **kwargs)
-
-
-def query(*args, **kwargs):
-    return default_db.query(*args, **kwargs)
-
-
-def _text_to_embedding(text: Optional[str], dim: int = 128):
-    return default_db._text_to_embedding(text, dim)
-
-
-def seed_default_models():
-    return default_db.seed_default_models()
-
-
-def search_by_text(text: str, k: int = 4):
-    return default_db.search_by_text(text, k=k)
-
-
-def save(path: str):
-    return default_db.save(path)
-
-
-def load(path: str):
-    return default_db.load(path)
+# NOTE: default_db and module-level wrapper functions removed intentionally.
+# This module now exposes only the VectorDB class and DEFAULT_DOCS. Callers
+# must create and manage VectorDB instances explicitly (e.g. via
+# `from app.vector_db import VectorDB; db = VectorDB()`).

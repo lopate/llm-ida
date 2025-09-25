@@ -1,5 +1,7 @@
-from app import vector_db
+from app.vector_db import VectorDB
 
 
 def test_more_smoke():
-    assert True
+    # trivial smoke to ensure VectorDB class is importable
+    v = VectorDB()
+    assert v is not None

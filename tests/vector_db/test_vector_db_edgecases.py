@@ -6,10 +6,10 @@ import math
 import numpy as np
 import pytest
 
-from app import vector_db
+from app.vector_db import VectorDB
 
-# use the module-level default instance for tests that previously touched module globals
-db = getattr(vector_db, 'default_db')
+# Use a fresh instance per test to avoid touching module-level globals
+db = VectorDB()
 
 
 def test_text_to_embedding_encode_raises(monkeypatch):
@@ -26,8 +26,7 @@ def test_text_to_embedding_encode_raises(monkeypatch):
     setattr(mod, 'SentenceTransformer', BadST)
     sys.modules['sentence_transformers'] = mod
     try:
-        setattr(db, '_st_model', None)
-        setattr(db, '_st_encoder_dim', None)
+        db.reset_st_model()
         v = db._text_to_embedding('some text', dim=8)
         # fallback should produce a normalized vector
         assert isinstance(v, list)
@@ -35,8 +34,7 @@ def test_text_to_embedding_encode_raises(monkeypatch):
         assert math.isclose(sum(x*x for x in v) ** 0.5, 1.0, rel_tol=1e-6)
     finally:
         sys.modules.pop('sentence_transformers', None)
-        vector_db.__dict__.pop('_st_model', None)
-        vector_db.__dict__.pop('_st_encoder_dim', None)
+        db.reset_st_model()
 
 
 def test_text_to_embedding_non_array_return(monkeypatch):
@@ -53,8 +51,7 @@ def test_text_to_embedding_non_array_return(monkeypatch):
     setattr(mod, 'SentenceTransformer', ZeroST)
     sys.modules['sentence_transformers'] = mod
     try:
-        setattr(db, '_st_model', None)
-        setattr(db, '_st_encoder_dim', None)
+        db.reset_st_model()
         v = db._text_to_embedding('empty', dim=4)
         # should fall back to list-handling branch and return normalized (zero -> zeros)
         assert isinstance(v, list)
@@ -62,8 +59,7 @@ def test_text_to_embedding_non_array_return(monkeypatch):
         assert all(x == 0.0 for x in v)
     finally:
         sys.modules.pop('sentence_transformers', None)
-        vector_db.__dict__.pop('_st_model', None)
-        vector_db.__dict__.pop('_st_encoder_dim', None)
+        db.reset_st_model()
 
 
 def test_faiss_autosave_flag_triggers_save(monkeypatch, tmp_path):
@@ -87,11 +83,10 @@ def test_faiss_autosave_flag_triggers_save(monkeypatch, tmp_path):
     sys.modules['faiss'] = fake_faiss
 
     try:
-        db._backend = 'faiss'
-        db._client = {'index': None, 'vectors': [], 'metadatas': []}
+        db.set_backend('faiss')
+        db.set_client({'index': None, 'vectors': [], 'metadatas': []})
         # configure instance-level autosave/path so upsert will call save
-        db._faiss_index_path = str(tmp_path / 'idx')
-        db._faiss_autosave = True
+        db.set_faiss_options(str(tmp_path / 'idx'), autosave=True)
         # set env as well for completeness
         monkeypatch.setenv('FAISS_AUTOSAVE', '1')
         monkeypatch.setenv('FAISS_PATH', str(tmp_path / 'idx'))
@@ -105,20 +100,20 @@ def test_faiss_autosave_flag_triggers_save(monkeypatch, tmp_path):
         assert (tmp_path / 'idx.index').exists()
     finally:
         sys.modules.pop('faiss', None)
-        db._backend = None
-        db._client = None
+        db.set_backend(None)
+        db.set_client(None)
         os.environ.pop('FAISS_AUTOSAVE', None)
         os.environ.pop('FAISS_PATH', None)
 
 
 def test_faiss_save_error_raises_when_no_index():
     # when backend != faiss or index None, save_faiss should raise
-    db._backend = 'memory'
+    db.set_backend('memory')
     with pytest.raises(RuntimeError):
         db.save('nope')
-    db._backend = 'faiss'
-    db._client = None
+    db.set_backend('faiss')
+    db.set_client(None)
     with pytest.raises(RuntimeError):
         db.save('nope')
-    db._backend = None
-    db._client = None
+    db.set_backend(None)
+    db.set_client(None)

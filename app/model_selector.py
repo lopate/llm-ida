@@ -8,7 +8,10 @@ except Exception:
     SentenceTransformer = None
     np = None
 
-from app import vector_db
+from app.vector_db import VectorDB
+
+# module-level instance for the selector to use; callers can pass a different instance
+VECTOR_DB = VectorDB()
 
 
 # Local model catalogue
@@ -37,21 +40,30 @@ def _embed_texts(texts: List[str]):
 
 def init_vector_db():
     # initialize vector DB and upsert model descriptions
-    vector_db.initialize()
+    VECTOR_DB.initialize()
     texts = [m["desc"] for m in MODEL_DB]
     ids = [m["id"] for m in MODEL_DB]
     embs = _embed_texts(texts)
+    # coerce numpy arrays to lists for the VectorDB interface
+    try:
+        embs = [[float(x) for x in e] for e in embs]
+    except Exception:
+        try:
+            embs = [list(e) for e in embs]
+        except Exception:
+            # fallback: zero vectors
+            embs = [[0.0] * 64 for _ in embs]
     metadatas = [{"name": m["name"], "library": m["library"], "desc": m["desc"]} for m in MODEL_DB]
-    vector_db.upsert(ids, embs, metadatas)
+    VECTOR_DB.upsert(ids, embs, metadatas)
 
 
 def find_best_model(query_text: str) -> Dict:
     # ensure DB initialized
-    if not vector_db.available():
+    if not VECTOR_DB.available():
         init_vector_db()
 
     q_emb = _embed_texts([query_text])[0]
-    res = vector_db.query(q_emb, k=1)
+    res = VECTOR_DB.query(q_emb, k=1)
     if not res:
         # fallback to simple heuristic
         # reuse previous logic

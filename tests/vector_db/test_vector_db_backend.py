@@ -1,5 +1,6 @@
-from app import vector_db
+from app.vector_db import VectorDB
 
 
 def test_backend_smoke():
-    assert hasattr(vector_db, 'upsert')
+    db = VectorDB()
+    assert hasattr(db, 'upsert')
