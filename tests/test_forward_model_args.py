@@ -13,7 +13,7 @@ def test_forward_model_args_from_choice(monkeypatch):
     monkeypatch.setitem(model_runner.RUNNERS, 'sktime', dummy)
 
     choice = {'library': 'sktime', 'model_name': 'my_model', 'model_args': {'a': 1}}
-    res = model_runner.run_model_from_choice(choice, np.array([1, 2, 3]), horizon=2)
+    _ = model_runner.run_model_from_choice(choice, np.array([1, 2, 3]), horizon=2)
 
     assert 'model_args' in captured
     assert captured['model_args'] == {'a': 1}
@@ -32,7 +32,7 @@ def test_forward_model_args_override(monkeypatch):
 
     choice = {'library': 'sktime', 'model_name': 'my_model', 'model_args': {'a': 1}}
     # pass model_args via kwargs to override/extend
-    res = model_runner.run_model_from_choice(choice, np.array([1, 2, 3]), horizon=2, model_args={'b': 2})
+    _ = model_runner.run_model_from_choice(choice, np.array([1, 2, 3]), horizon=2, model_args={'b': 2})
 
     assert 'model_args' in captured
     # merged dict should contain both keys a and b, kwargs wins on conflicts

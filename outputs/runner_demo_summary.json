@@ -1,0 +1,20 @@
+{
+  "uni_choice": {
+    "library": "sktime",
+    "model_name": "naive",
+    "model_args": {}
+  },
+  "sensors_choice": {
+    "library": "tslearn",
+    "model_name": "knn",
+    "model_args": {
+      "n_neighbors": 3
+    }
+  },
+  "uni_pred_shape": [
+    12
+  ],
+  "sensors_pred_shape": [
+    8
+  ]
+}

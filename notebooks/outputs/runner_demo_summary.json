@@ -1,0 +1,20 @@
+{
+  "uni_choice": {
+    "library": "sktime",
+    "model_name": "AutoARIMA",
+    "model_args": {}
+  },
+  "sensors_choice": {
+    "library": "torch_geometric",
+    "model_name": "GAT",
+    "model_args": {
+      "layers": 2
+    }
+  },
+  "uni_pred_shape": [
+    12
+  ],
+  "sensors_pred_shape": [
+    8
+  ]
+}

@@ -1,8 +1,6 @@
-import importlib
 import runpy
 import sys
 import os
-import types
 
 
 def test_cli_guard_adds_repo_root(tmp_path, monkeypatch):

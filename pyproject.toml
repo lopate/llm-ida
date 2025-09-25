@@ -1,3 +1,12 @@
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+
+[tool.ruff]
+# Keep default rule selection; only set a pragmatic line length and
+# per-file ignores for optional imports.
+line-length = 88
+
+[tool.ruff.lint]
+per-file-ignores = { "app/**.py" = ["F401", "F403", "F821"], "tests/**.py" = ["F401", "F403"], "scripts/**.py" = ["F401"] }

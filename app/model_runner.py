@@ -1,10 +1,13 @@
 import csv
 import io
-from typing import Tuple, List, Any
+import importlib
+import importlib.util as importlib_util
+from typing import Tuple, List, Any, Dict, Optional, TypedDict, Union, TYPE_CHECKING
 import numpy as np
+from numpy.typing import NDArray
 
 
-def make_forecaster(name: str, args: dict = None):
+def make_forecaster(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
     """Module-level factory for creating sktime forecasters.
 
     This is a thin wrapper used by `run_sktime` and is convenient to patch in tests.
@@ -19,10 +22,10 @@ def make_forecaster(name: str, args: dict = None):
     except Exception:
         # sktime not available -> return a simple lambda-like object
         class Simple:
-            def fit(self, y):
+            def fit(self, y: Any) -> Any:
                 return self
 
-            def predict(self, fh):
+            def predict(self, fh: Any) -> Any:
                 import numpy as _np
                 return _np.zeros(len(fh))
 
@@ -31,7 +34,7 @@ def make_forecaster(name: str, args: dict = None):
     if name_l in ('naive', 'last'):
         # use a tiny, stable local forecaster to avoid sktime internal warnings
         class Simple:
-            def fit(self, y):
+            def fit(self, y: Any) -> Any:
                 # accept pandas Series or numpy array
                 import numpy as _np
                 import pandas as _pd
@@ -41,7 +44,7 @@ def make_forecaster(name: str, args: dict = None):
                     self._y = _np.asarray(y)
                 return self
 
-            def predict(self, fh):
+            def predict(self, fh: Any) -> Any:
                 import numpy as _np
                 # simple last-value persistence
                 if getattr(self, '_y', None) is None or len(self._y) == 0:
@@ -53,17 +56,17 @@ def make_forecaster(name: str, args: dict = None):
 
     if name_l in ('autoarima', 'arima', 'auto_arima'):
         try:
-            from sktime.forecasting.arima import AutoARIMA
+            from sktime.forecasting.arima import AutoARIMA  # type: ignore
             return AutoARIMA(**args) if args else AutoARIMA()
         except Exception:
-            return NaiveForecaster(strategy='last')
+            return make_forecaster('naive')
 
     if name_l in ('autoets', 'ets', 'auto_ets'):
         try:
-            from sktime.forecasting.ets import AutoETS
+            from sktime.forecasting.ets import AutoETS  # type: ignore
             return AutoETS(**args) if args else AutoETS()
         except Exception:
-            return NaiveForecaster(strategy='last')
+            return make_forecaster('naive')
 
     if name_l in ('forest', 'randomforest', 'rf'):
         try:
@@ -73,11 +76,11 @@ def make_forecaster(name: str, args: dict = None):
             reg = RandomForestRegressor(n_estimators=n_est)
             return ReducedRegressionForecaster(regressor=reg)
         except Exception:
-            return NaiveForecaster(strategy='last')
+            return make_forecaster('naive')
 
     # default: return a simple stable forecaster
     class SimpleDefault:
-        def fit(self, y):
+        def fit(self, y: Any) -> Any:
             import numpy as _np
             import pandas as _pd
             if isinstance(y, _pd.Series):
@@ -86,7 +89,7 @@ def make_forecaster(name: str, args: dict = None):
                 self._y = _np.asarray(y)
             return self
 
-        def predict(self, fh):
+        def predict(self, fh: Any) -> Any:
             import numpy as _np
             if getattr(self, '_y', None) is None or len(self._y) == 0:
                 return _np.zeros(len(fh))
@@ -96,7 +99,64 @@ def make_forecaster(name: str, args: dict = None):
     return SimpleDefault()
 
 
-def _to_csv(header: List[str], rows: List[List]) -> str:
+class ModelChoice(TypedDict, total=False):
+    library: str
+    model_name: str
+    model_args: Dict[str, Any]
+
+
+class ModelCandidate(TypedDict, total=False):
+    """TypedDict representing a candidate entry used by the selector and RAG.
+
+    Fields:
+    - library: required library identifier (e.g. 'sktime')
+    - model_name: optional model name within the library (e.g. 'AutoARIMA')
+    - description: optional textual description used by RAG prompts
+    - id: optional stable id for the candidate
+    - score: optional retrieval score (float)
+    - model_args: optional model args dict
+    """
+    library: str
+    model_name: str
+    description: str
+    id: str
+    score: float
+    model_args: Dict[str, Any]
+
+
+# Numpy ndarray alias for typing
+ArrayND = NDArray[Any]
+
+if TYPE_CHECKING:
+    # Help static checker know optional third-party modules (no runtime import here)
+    try:
+        from sktime.forecasting.base import ForecastingHorizon  # type: ignore
+    except Exception:
+        ForecastingHorizon = Any  # type: ignore
+    try:
+        from tslearn.neighbors import KNeighborsTimeSeriesRegressor  # type: ignore
+    except Exception:
+        KNeighborsTimeSeriesRegressor = Any  # type: ignore
+    try:
+        from torch_geometric.nn import GCNConv  # type: ignore
+    except Exception:
+        GCNConv = Any  # type: ignore
+    # Common sktime symbols used at runtime but may lack stubs
+    try:
+        from sktime.forecasting.arima import AutoARIMA  # type: ignore
+    except Exception:
+        AutoARIMA = Any  # type: ignore
+    try:
+        from sktime.forecasting.ets import AutoETS  # type: ignore
+    except Exception:
+        AutoETS = Any  # type: ignore
+    try:
+            from sktime.forecasting.compose import ReducedRegressionForecaster  # type: ignore
+    except Exception:
+        ReducedRegressionForecaster = Any  # type: ignore
+
+
+def _to_csv(header: List[str], rows: List[List[Any]]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(header)
@@ -104,7 +164,7 @@ def _to_csv(header: List[str], rows: List[List]) -> str:
     return buf.getvalue()
 
 
-def run_pysteps(csv_text: str, **kwargs):
+def run_pysteps(csv_text: str, **kwargs: Any) -> str:
     """Adapter for PySTEPS-like nowcasting.
 
     Attempt to use `pysteps` if installed to run a simple extrapolation (persistence
@@ -114,7 +174,7 @@ def run_pysteps(csv_text: str, **kwargs):
     horizon = int(kwargs.get('horizon', 3))
     # try to parse CSV into a 2D array (T, N) or 3D (T,N,F)
     try:
-        arr = _csv_to_array(csv_text)
+        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
     except Exception:
         arr = None
 
@@ -123,22 +183,23 @@ def run_pysteps(csv_text: str, **kwargs):
         import numpy as _np
         # lightweight use of pysteps nowcasting: try `pysteps.motion` if present
         try:
-            from pysteps import motion
-            # We will use a trivial persistence: copy last frame for each horizon step
-            if isinstance(arr, _np.ndarray) and arr.ndim >= 2:
-                last = arr[-1]
-                out_rows = []
-                for i in range(horizon):
-                    # flatten per-node values if needed
-                    if last.ndim == 1:
-                        vals = last.tolist()
-                    else:
-                        # take first feature channel
-                        vals = (last[:, 0] if last.ndim >= 2 else last.ravel()).tolist()
-                    # produce one row per node
-                    for n, v in enumerate(vals):
-                        out_rows.append([i + 1, n, float(v)])
-                return _to_csv(["horizon", "node", "forecast"], out_rows)
+            # check for presence of pysteps without importing symbols to avoid linter complaints
+            if importlib_util.find_spec('pysteps') is not None:
+                # We will use a trivial persistence: copy last frame for each horizon step
+                if isinstance(arr, _np.ndarray) and arr.ndim >= 2:
+                    last = arr[-1]
+                    out_rows = []
+                    for i in range(horizon):
+                        # flatten per-node values if needed
+                        if last.ndim == 1:
+                            vals = last.tolist()
+                        else:
+                            # take first feature channel
+                            vals = (last[:, 0] if last.ndim >= 2 else last.ravel()).tolist()
+                        # produce one row per node
+                        for n, v in enumerate(vals):
+                            out_rows.append([i + 1, n, float(v)])
+                    return _to_csv(["horizon", "node", "forecast"], out_rows)
         except Exception:
             # if pysteps import fails or motion API missing, proceed to fallback below
             pass
@@ -150,8 +211,8 @@ def run_pysteps(csv_text: str, **kwargs):
     lines = [r for r in csv_text.splitlines() if r.strip()]
     header = lines[0].split(",") if lines else ["t", "value"]
     vals = []
-    for l in lines[1:]:
-        parts = l.split(",")
+    for line in lines[1:]:
+        parts = line.split(",")
         try:
             vals.append(float(parts[-1]))
         except Exception:
@@ -170,7 +231,7 @@ def run_pysteps(csv_text: str, **kwargs):
     return _to_csv(["horizon", "forecast"], out_rows)
 
 
-def run_sktime(csv_text: str, *args, **kwargs):
+def run_sktime(csv_text: str, *args: Any, **kwargs: Any) -> str:
     """Real sktime adapter: fits a simple forecaster per-node and returns CSV.
 
     Accepts `csv_text` produced by `_to_csv_for_runner` (or raw CSV). If `sktime`
@@ -194,7 +255,7 @@ def run_sktime(csv_text: str, *args, **kwargs):
 
     # parse CSV into numpy array if possible
     try:
-        arr = _csv_to_array(csv_text)
+        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
     except Exception:
         arr = None
 
@@ -205,7 +266,8 @@ def run_sktime(csv_text: str, *args, **kwargs):
 
         # delegate forecaster construction to module-level factory so it can be patched in tests
         # make_forecaster will provide a lightweight local forecaster for 'naive' strategy
-        def _apply_forecaster(series, forecaster):
+        def _apply_forecaster(series: Any, forecaster: Any) -> ArrayND:
+            """Fit forecaster and return 1D numpy predictions."""
             forecaster.fit(series)
             # try numeric fh first (many simple forecasters accept array-like)
             fh_try = _np.arange(1, horizon + 1)
@@ -241,10 +303,28 @@ def run_sktime(csv_text: str, *args, **kwargs):
             rows = [[i + 1, float(pred[i])] for i in range(len(pred))]
             return _to_csv(["horizon", "forecast"], rows)
 
+        # 3D case (T, N, F): treat as spatio-temporal with nodes in axis 1
+        if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
+            _T, N = int(arr.shape[0]), int(arr.shape[1])
+            out: ArrayND = _np.zeros((horizon, N, 1), dtype=_np.float32)
+            for n in range(N):
+                series = pd.Series(arr[:, n, 0]).dropna()
+                if series.empty:
+                    out[:, n, 0] = _np.full((horizon,), 0.0, dtype=_np.float32)
+                    continue
+                forecaster = make_forecaster(model_name, model_args)
+                pred = _apply_forecaster(series, forecaster)
+                out[:, n, 0] = pred
+            rows = []
+            for h in range(horizon):
+                for n in range(N):
+                    rows.append([h + 1, n, float(out[h, n, 0])])
+            return _to_csv(["horizon", "node", "forecast"], rows)
+
         # if arr is 2D treat as (T, features)
         if isinstance(arr, _np.ndarray) and arr.ndim == 2:
-            T, N = arr.shape
-            out = _np.zeros((horizon, N), dtype=_np.float32)
+            _T, N = int(arr.shape[0]), int(arr.shape[1])
+            out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
             for n in range(N):
                 series = pd.Series(arr[:, n]).dropna()
                 if series.empty:
@@ -260,34 +340,15 @@ def run_sktime(csv_text: str, *args, **kwargs):
                     rows.append([h + 1, n, float(out[h, n])])
             return _to_csv(["horizon", "node", "forecast"], rows)
 
-        # 3D case (T, N, F)
-        if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
-            T, N, F = arr.shape[0], arr.shape[1], (arr.shape[2] if arr.ndim >= 3 else 1)
-            out = _np.zeros((horizon, N, 1), dtype=_np.float32)
-            for n in range(N):
-                series = pd.Series(arr[:, n, 0]).dropna()
-                if series.empty:
-                    out[:, n, 0] = _np.full((horizon,), 0.0, dtype=_np.float32)
-                    continue
-                forecaster = make_forecaster(model_name, model_args)
-                pred = _apply_forecaster(series, forecaster)
-                out[:, n, 0] = pred
-            rows = []
-            for h in range(horizon):
-                for n in range(N):
-                    rows.append([h + 1, n, float(out[h, n, 0])])
-            return _to_csv(["horizon", "node", "forecast"], rows)
-
     except Exception:
         # fall back to mock behavior below
         pass
 
     # if sktime not available or parsing failed, use simple mock behavior
-    lines = [l for l in csv_text.splitlines() if l.strip()]
-    header = lines[0].split(",") if lines else ["horizon", "forecast"]
+    lines: List[str] = [line for line in csv_text.splitlines() if line.strip()]
     vals = []
-    for l in lines[1:]:
-        parts = l.split(",")
+    for line in lines[1:]:
+        parts = line.split(",")
         try:
             vals.append(float(parts[-1]))
         except Exception:
@@ -297,7 +358,7 @@ def run_sktime(csv_text: str, *args, **kwargs):
     return _to_csv(["horizon","forecast"], rows)
 
 
-def run_tslearn(csv_text: str, **kwargs):
+def run_tslearn(csv_text: str, **kwargs: Any) -> str:
     """tslearn adapter with sliding-window KNN fallback.
 
     Attempts to use `tslearn` neighbor regressor if available; otherwise
@@ -312,23 +373,22 @@ def run_tslearn(csv_text: str, **kwargs):
     """
     # extract kwargs
     horizon = int(kwargs.get('horizon', 3))
-    model_name = kwargs.get('model_name') or ''
     model_args = kwargs.get('model_args') or {}
     n_neighbors = int(model_args.get('n_neighbors', 5))
     window_size = int(model_args.get('window_size', 10))
 
     # parse input into numpy array if possible
     try:
-        arr = _csv_to_array(csv_text)
+        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
     except Exception:
         arr = None
 
     import numpy as _np
 
-    def _predict_series_knn(series: _np.ndarray):
+    def _predict_series_knn(series: _np.ndarray) -> ArrayND:
         """Train a sliding-window KNN regressor to predict `horizon` values."""
         series = _np.asarray(series, dtype=_np.float32)
-        T = series.shape[0]
+        T = int(series.shape[0])
         if T < 1:
             return _np.zeros((horizon,), dtype=_np.float32)
 
@@ -355,8 +415,7 @@ def run_tslearn(csv_text: str, **kwargs):
         # Try tslearn regressor first (if it provides a convenient API)
         try:
             # avoid importing tslearn if h5py is not installed (tslearn warns about this)
-            import importlib
-            has_h5py = importlib.util.find_spec('h5py') is not None
+            has_h5py = importlib_util.find_spec('h5py') is not None
             if has_h5py:
                 from tslearn.neighbors import KNeighborsTimeSeriesRegressor
                 # KNeighborsTimeSeriesRegressor expects shape (n_ts, sz, d) for time series
@@ -400,8 +459,8 @@ def run_tslearn(csv_text: str, **kwargs):
 
         # 2D: treat as (T, N) -> nodes in columns
         if isinstance(arr, _np.ndarray) and arr.ndim == 2:
-            T, N = arr.shape
-            out = _np.zeros((horizon, N), dtype=_np.float32)
+            _T, N = int(arr.shape[0]), int(arr.shape[1])
+            out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
             for n in range(N):
                 series = arr[:, n]
                 out[:, n] = _predict_series_knn(series)
@@ -413,8 +472,8 @@ def run_tslearn(csv_text: str, **kwargs):
 
         # 3D: (T, N, F)
         if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
-            T, N = arr.shape[0], arr.shape[1]
-            out = _np.zeros((horizon, N, 1), dtype=_np.float32)
+            N = int(arr.shape[1])
+            out: ArrayND = _np.zeros((horizon, N, 1), dtype=_np.float32)
             for n in range(N):
                 series = arr[:, n, 0]
                 out[:, n, 0] = _predict_series_knn(series)
@@ -428,11 +487,11 @@ def run_tslearn(csv_text: str, **kwargs):
         pass
 
     # final fallback: median-based simple output similar to previous mock
-    lines = [l for l in csv_text.splitlines() if l.strip()]
+    lines = [line for line in csv_text.splitlines() if line.strip()]
     vals = []
-    for l in lines[1:]:
+    for line in lines[1:]:
         try:
-            vals.append(float(l.split(",")[-1]))
+            vals.append(float(line.split(",")[-1]))
         except Exception:
             pass
     vals.sort()
@@ -441,7 +500,7 @@ def run_tslearn(csv_text: str, **kwargs):
     return _to_csv(["horizon", "forecast"], rows)
 
 
-def run_torch_geometric(csv_text: str, **kwargs):
+def run_torch_geometric(csv_text: str, **kwargs: Any) -> str:
     """Adapter for graph-based models (torch_geometric).
 
     Attempt to construct a simple graph-based prediction if `torch_geometric` is
@@ -606,13 +665,12 @@ def run_torch_geometric(csv_text: str, **kwargs):
         pass
 
     # fallback: simple linear extrapolation per-node using last two values
-    lines = [l for l in csv_text.splitlines() if l.strip()]
+    lines = [line for line in csv_text.splitlines() if line.strip()]
     vals_by_node = {}
-    for l in lines[1:]:
-        parts = l.split(',')
+    for line in lines[1:]:
+        parts = line.split(',')
         if len(parts) >= 3:
             try:
-                t = parts[0]
                 node = int(parts[1])
                 v = float(parts[-1])
             except Exception:
@@ -633,9 +691,9 @@ def run_torch_geometric(csv_text: str, **kwargs):
 
     # ultimate fallback: scalar extrapolation
     vals = []
-    for l in lines[1:]:
+    for line in lines[1:]:
         try:
-            vals.append(float(l.split(',')[-1]))
+            vals.append(float(line.split(',')[-1]))
         except Exception:
             pass
     if len(vals) >= 2:
@@ -654,7 +712,7 @@ RUNNERS = {
 }
 
 
-def run_model(lib_name: str, csv_text: str, **kwargs) -> Tuple[str, str]:
+def run_model(lib_name: str, csv_text: str, **kwargs: Any) -> Tuple[str, str]:
     """Run mock model and return (code_py, predictions_csv).
 
     Any additional keyword arguments are forwarded to the underlying runner
@@ -726,14 +784,14 @@ def run_model(lib_name: str, csv_text: str, **kwargs) -> Tuple[str, str]:
     return code, predictions
 
 
-def _csv_to_array(csv_text: str):
+def _csv_to_array(csv_text: str) -> Union[ArrayND, List[float]]:
     """Parse CSV with header (t,node,value) into numpy array of shape (T,N,1).
     If CSV has a different layout, try to return a 2D array (T, features).
     """
     import csv
     from collections import defaultdict
 
-    lines = [l for l in csv_text.splitlines() if l.strip()]
+    lines = [line for line in csv_text.splitlines() if line.strip()]
     if not lines:
         return np.zeros((0, 0, 1), dtype=np.float32)
     reader = csv.reader(lines)
@@ -803,7 +861,7 @@ def _csv_to_array(csv_text: str):
     return np.array(vals, dtype=np.float32)
 
 
-def run_model_from_choice(choice: dict, input_data, horizon: int = 3, **kwargs):
+def run_model_from_choice(choice: Union[ModelChoice, str], input_data: Any, horizon: int = 3, **kwargs: Any) -> Dict[str, Any]:
     """Run a selected model given the LLM choice dict (or library name string).
 
     Parameters:

@@ -1,6 +1,5 @@
 import importlib
 import numpy as np
-import pytest
 
 
 def _run(choice, X, horizon=3):

@@ -2,8 +2,6 @@ import pytest
 import numpy as np
 
 try:
-    import torch
-    from torch_geometric.nn import GCNConv  # type: ignore
     TORCH_OK = True
 except Exception:
     TORCH_OK = False

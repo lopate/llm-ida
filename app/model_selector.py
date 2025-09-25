@@ -1,6 +1,5 @@
-from typing import List, Dict, Optional
+from typing import List, Dict
 import os
-import math
 
 try:
     from sentence_transformers import SentenceTransformer

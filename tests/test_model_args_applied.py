@@ -1,7 +1,6 @@
 import importlib
 import numpy as np
 from unittest.mock import MagicMock
-import pytest
 
 
 def test_randomforest_n_estimators_passed():
@@ -27,7 +26,7 @@ def test_randomforest_n_estimators_passed():
     try:
         series = np.arange(20).astype(float)
         choice = {'library': 'sktime', 'model_name': 'forest', 'model_args': {'n_estimators': 7}}
-        res = mr.run_model_from_choice(choice, series, horizon=3)
+        _ = mr.run_model_from_choice(choice, series, horizon=3)
     finally:
         # restore original if present
         if orig_rrf is None:
@@ -71,7 +70,7 @@ def test_randomforest_default_n_estimators_used():
     try:
         series = np.arange(15).astype(float)
         choice = {'library': 'sktime', 'model_name': 'forest', 'model_args': {}}
-        res = mr.run_model_from_choice(choice, series, horizon=2)
+        _ = mr.run_model_from_choice(choice, series, horizon=2)
     finally:
         if orig_rrf2 is None:
             try:

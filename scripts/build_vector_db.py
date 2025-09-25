@@ -17,7 +17,6 @@ import os
 # Try to ensure the repository root is on sys.path so `from app import ...` works without external env setup.
 def _ensure_repo_on_path():
     try:
-        import app  # quick check
         return
     except Exception:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
