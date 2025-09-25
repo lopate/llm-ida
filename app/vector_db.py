@@ -287,7 +287,8 @@ class VectorDB:
         return self.query(emb, k=k)
 
     def save(self, path: str):
-        if self._backend == 'faiss' and isinstance(self._client, dict) and 'index' in self._client:
+        # Only FAISS backend supports save; raise for other backends or missing index
+        if self._backend == 'faiss' and isinstance(self._client, dict) and 'index' in self._client and self._client.get('index') is not None:
             import faiss
             idx_path = path + '.index'
             meta_path = path + '.meta.json'
@@ -295,6 +296,8 @@ class VectorDB:
             with open(meta_path, 'w', encoding='utf-8') as f:
                 json.dump(self._client.get('metadatas', []), f, ensure_ascii=False)
             return idx_path, meta_path
+
+        raise RuntimeError('Save not supported for backend: ' + str(self._backend))
 
     def load(self, path: str):
         if self._backend == 'faiss':

@@ -10,3 +10,19 @@ line-length = 88
 
 [tool.ruff.lint]
 per-file-ignores = { "app/**.py" = ["F401", "F403", "F821"], "tests/**.py" = ["F401", "F403"], "scripts/**.py" = ["F401"] }
+
+[project]
+name = "llm_ida"
+version = "0.0.0"
+dependencies = [
+	"fastapi",
+	"uvicorn",
+	"transformers",
+	"torch",
+	"sktime",
+	"tslearn",
+	"torch-geometric",
+	"pytest",
+	"sentence-transformers",
+	"faiss-cpu",
+]
