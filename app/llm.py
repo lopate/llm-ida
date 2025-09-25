@@ -63,21 +63,50 @@ def build_prompt(dataset_desc: str, task: str, candidates: List[Union[str, Tuple
 def call_transformers(prompt: str, model_name: str) -> Dict:
     try:
         from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
-        import torch
     except Exception as e:
-        raise RuntimeError(f"transformers/torch not available: {e}")
+        raise RuntimeError(f"transformers not available: {e}")
 
     # Попытка загрузить модель (может быть локальной) — задаётся через HF_MODEL
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
-    device = 0 if torch.cuda.is_available() else -1
+    # Try to import torch if available; it's optional for tests that mock transformers.
+    try:
+        import torch
+        has_torch = True
+    except Exception:
+        torch = None  # type: ignore
+        has_torch = False
+
+    if has_torch:
+        try:
+            device = 0 if getattr(torch, 'cuda', None) and torch.cuda.is_available() else -1
+        except Exception:
+            device = -1
+    else:
+        device = -1
     gen = pipeline("text-generation", model=model, tokenizer=tokenizer, device=device)
 
     out = gen(prompt, max_new_tokens=300, do_sample=False)
     # Выход может быть в поле 'generated_text' или 'text' в зависимости от версии
     text = out[0].get("generated_text") or out[0].get("text") or str(out[0])
 
+    # Use shared extractor
+    parsed = extract_json_from_text(text)
+    if parsed is not None:
+        return parsed
+
+    # Если всё ещё не получилось — вернём ошибку для fallback
+    raise RuntimeError("Failed to parse JSON from local transformers output")
+
+
+def extract_json_from_text(text: str) -> Dict | None:
+    """Extract JSON object from free-form model text.
+
+    Returns parsed dict if successful, otherwise None.
+    This pulls out JSON placed between <<JSON>><</JSON>> markers first, then
+    searches for the first balanced JSON substring.
+    """
     # Попробуем извлечь JSON между явными маркерами, если они есть
     marker_match = re.search(r"<<JSON>>(.*?)<</JSON>>", text, flags=re.S)
     if marker_match:
@@ -88,31 +117,23 @@ def call_transformers(prompt: str, model_name: str) -> Dict:
             # fall through to balanced extraction
             pass
 
-    # Если маркеры не найдены или парсинг не удался, используем предыдущую попытку —
-    # поиск первой сбалансированной JSON-подстроки.
-    def _extract_balanced_json(s: str) -> str:
-        start = s.find('{')
-        if start == -1:
-            return ''
-        depth = 0
-        for i in range(start, len(s)):
-            if s[i] == '{':
-                depth += 1
-            elif s[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    return s[start:i + 1]
-        return ''
-
-    candidate = _extract_balanced_json(text)
-    if candidate:
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-
-    # Если всё ещё не получилось — вернём ошибку для fallback
-    raise RuntimeError("Failed to parse JSON from local transformers output")
+    # Поиск первой сбалансированной JSON-подстроки.
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    return None
+    return None
 
 
 def select_model(dataset_desc: str, task: str, candidates: List[Union[str, Tuple[str, str]]], hf_model_name: str = HF_MODEL_DEFAULT) -> Dict:

@@ -1,15 +1,13 @@
+import os
 import pytest
 import numpy as np
 
-try:
-    TORCH_OK = True
-except Exception:
-    TORCH_OK = False
+import torch
+import torch_geometric
 
 import app.model_runner as mr
 
 
-@pytest.mark.skipif(not TORCH_OK, reason='torch or torch_geometric not installed')
 def test_torch_geometric_gcn_with_edge_index():
     # construct small (T,N,1) array
     T, N = 6, 4
