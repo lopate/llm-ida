@@ -12,6 +12,7 @@ def run_service(
     task: str = 'forecast',
     horizon: int = 3,
     prefer_selector: bool = True,
+    hf_model_name: str = llm.HF_MODEL_DEFAULT,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """High-level wrapper that selects a model via `app.llm.select_model` and runs it.
@@ -29,7 +30,8 @@ def run_service(
 
     # First try the RAG-based selector from app.llm (vector DB retrieval + selection)
     try:
-        sel = llm.select_model_rag(dataset_desc, task, db=db)
+        # allow callers to override hf_model_name (empty string disables local HF call)
+        sel = llm.select_model_rag(dataset_desc, task, db=db, hf_model_name=hf_model_name)
         if isinstance(sel, dict) and 'library' in sel:
             choice = sel
             logs.append('used app.llm.select_model_rag')

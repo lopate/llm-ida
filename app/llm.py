@@ -1,5 +1,7 @@
 import os
 import json
+import logging
+import ast
 from typing import List, Dict, Tuple, Union, Any
 import re
 from typing import Any
@@ -78,26 +80,135 @@ def call_transformers(prompt: str, model_name: str) -> Dict:
         torch = None  # type: ignore
         has_torch = False
 
-    if has_torch:
+    # Allow explicit override via environment variable HF_DEVICE:
+    # -1 means CPU, 0 means first CUDA device, etc. Defaults to auto-detect.
+    hf_dev = os.environ.get("HF_DEVICE", None)
+    if hf_dev is not None:
         try:
-            device = 0 if getattr(torch, 'cuda', None) and torch.cuda.is_available() else -1
+            device = int(hf_dev)
         except Exception:
             device = -1
     else:
-        device = -1
+        if has_torch:
+            try:
+                device = 0 if getattr(torch, 'cuda', None) and torch.cuda.is_available() else -1
+            except Exception:
+                device = -1
+        else:
+            device = -1
+
+    # Use logging for informational messages instead of printing to stdout
+    logging.getLogger(__name__).info("Creating transformers pipeline (device=%s) for model %s", device, model_name)
     gen = pipeline("text-generation", model=model, tokenizer=tokenizer, device=device)
 
-    out = gen(prompt, max_new_tokens=300, do_sample=False)
-    # Выход может быть в поле 'generated_text' или 'text' в зависимости от версии
-    text = out[0].get("generated_text") or out[0].get("text") or str(out[0])
+    # Provide a small explicit example to encourage the model to place JSON between markers
+    example_output = 'Example output:\n<<JSON>>{"library":"sktime","model_name":"AutoARIMA"}<</JSON>>\n'
+    full_prompt = example_output + prompt
+    out = gen(full_prompt, max_new_tokens=300, do_sample=False)
+    # The generated output field depends on transformers version
+    raw_text = out[0].get("generated_text") or out[0].get("text") or str(out[0])
+
+    # Clean common wrappers/noise (device logs, warnings, code fences)
+    text = _clean_transformers_text(raw_text)
 
     # Use shared extractor
     parsed = extract_json_from_text(text)
     if parsed is not None:
         return parsed
 
-    # Если всё ещё не получилось — вернём ошибку для fallback
-    raise RuntimeError("Failed to parse JSON from local transformers output")
+    # Try a tolerant eval-style fallback (single quotes, python dicts)
+    try:
+        maybe = ast.literal_eval(text.strip())
+        if isinstance(maybe, dict):
+            return maybe
+    except Exception:
+        pass
+    # If still failing, attempt 1-2 retries with deterministic decoding (do_sample=False)
+    retry_attempts = [
+        {"do_sample": False},
+        {"do_sample": False},
+    ]
+    stricter_prompt = (
+        "Please output ONLY valid JSON between the markers <<JSON>> and <</JSON>>. "
+        "Do not include any additional text outside the markers.\n" + example_output + prompt
+    )
+    attempt = 0
+    for kw in retry_attempts:
+        attempt += 1
+        try:
+            logging.getLogger(__name__).info('Retrying transformers generation attempt %d with %s', attempt, kw)
+            out2 = gen(stricter_prompt, max_new_tokens=300, **kw)
+            raw2 = out2[0].get('generated_text') or out2[0].get('text') or str(out2[0])
+            logging.getLogger(__name__).debug('Retry raw output (attempt %d): %s', attempt, raw2[:400])
+            text2 = _clean_transformers_text(raw2)
+            parsed2 = extract_json_from_text(text2)
+            if parsed2 is not None:
+                return parsed2
+            try:
+                maybe2 = ast.literal_eval(text2.strip())
+                if isinstance(maybe2, dict):
+                    return maybe2
+            except Exception:
+                pass
+            # save raw attempt for debugging
+            try:
+                dump_path = f'/tmp/llm_raw_output_attempt_{attempt}.txt'
+                with open(dump_path, 'w', encoding='utf-8') as f:
+                    f.write(raw2 if isinstance(raw2, str) else str(raw2))
+                logging.getLogger(__name__).debug('Wrote retry raw transformers output to %s', dump_path)
+            except Exception:
+                dump_path = None
+        except Exception as e:
+            logging.getLogger(__name__).warning('Retry attempt %d failed: %s', attempt, e)
+
+    # persist original raw output for offline inspection
+    try:
+        dump_path = '/tmp/llm_last_raw_output.txt'
+        with open(dump_path, 'w', encoding='utf-8') as f:
+            f.write(raw_text if isinstance(raw_text, str) else str(raw_text))
+        logging.getLogger(__name__).debug('Wrote raw transformers output to %s', dump_path)
+    except Exception:
+        dump_path = None
+
+    sample = text.strip()[:200].replace('\n', ' ')
+    if dump_path:
+        raise RuntimeError(
+            f"Failed to parse JSON from local transformers output (sample={sample!r}); raw output saved to {dump_path}"
+        )
+    else:
+        raise RuntimeError(f"Failed to parse JSON from local transformers output (sample={sample!r})")
+
+
+def _clean_transformers_text(text: str) -> str:
+    """Remove common wrappers and noise from transformer-generated text.
+
+    - Strip device/warning lines (e.g., 'Device set to use cuda:0')
+    - Remove markdown/code fences ```...``` and inline backticks
+    - Collapse repeated whitespace
+    """
+    if not isinstance(text, str):
+        return str(text)
+
+    # Remove common device/warning lines
+    lines = []
+    for ln in text.splitlines():
+        if re.search(r"device set to use", ln, flags=re.I):
+            # drop diagnostic device messages
+            continue
+        if re.search(r"the following generation flags are not valid", ln, flags=re.I):
+            continue
+        lines.append(ln)
+    text = "\n".join(lines)
+
+    # Replace triple-backtick code fences and keep their inner content (commonly used for JSON)
+    # e.g. ```json\n{...}\n``` -> {...}
+    text = re.sub(r"```(?:json)?\n?(.*?)```", r"\1", text, flags=re.S)
+    # Remove inline backticks
+    text = text.replace('`', '')
+    # Collapse multiple newlines and whitespace
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
 
 
 def extract_json_from_text(text: str) -> Dict | None:
@@ -118,21 +229,39 @@ def extract_json_from_text(text: str) -> Dict | None:
             pass
 
     # Поиск первой сбалансированной JSON-подстроки.
+    # Try to find a balanced JSON object start..end; be tolerant to extra trailing text
     start = text.find('{')
     if start == -1:
         return None
     depth = 0
     for i in range(start, len(text)):
-        if text[i] == '{':
+        ch = text[i]
+        if ch == '{':
             depth += 1
-        elif text[i] == '}':
+        elif ch == '}':
             depth -= 1
             if depth == 0:
                 candidate = text[start:i + 1]
                 try:
                     return json.loads(candidate)
                 except Exception:
-                    return None
+                    # Try to repair JSON: convert single quotes to double quotes for keys/strings
+                    repaired = candidate.replace("'", '"')
+                    try:
+                        return json.loads(repaired)
+                    except Exception:
+                        # give up on this candidate, but continue searching for another opening brace
+                        pass
+    # As a last resort, attempt to find any {...} substring via regex (non-greedy)
+    for m in re.finditer(r"\{.*?\}", text, flags=re.S):
+        s = m.group(0)
+        try:
+            return json.loads(s)
+        except Exception:
+            try:
+                return json.loads(s.replace("'", '"'))
+            except Exception:
+                continue
     return None
 
 
