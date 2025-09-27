@@ -19,18 +19,23 @@ def test_pysteps_basic_multi_node():
             lines.append([str(t), str(n), f"{t*10 + n}.0"])
     csv_text = "\n".join([",".join(r) for r in lines])
 
-    out = mr.run_pysteps(csv_text, horizon=3)
-    hdr, rows = _parse_csv(out)
-    # should contain 'forecast' column or 'value' depending on branch
-    assert any('forecast' in h or 'value' in h for h in hdr)
-    # expect at least horizon rows in output
-    assert len(rows) >= 3
+    # Provide array input and expect array output (H, N)
+    import numpy as _np
+    # create T,N,1 array
+    arr = _np.zeros((5, 2, 1), dtype=_np.float32)
+    for t in range(5):
+        arr[t, 0, 0] = t * 10 + 0.0
+        arr[t, 1, 0] = t * 10 + 1.0
+
+    out = mr.run_pysteps(arr, horizon=3)
+    assert isinstance(out, _np.ndarray)
+    assert out.shape[0] >= 3
 
 
 def test_pysteps_fallback_scalar():
     # simple two-line CSV without node column
-    csv_text = "time,value\n0,1.0\n1,2.0\n2,3.0"
-    out = mr.run_pysteps(csv_text, horizon=4)
-    hdr, rows = _parse_csv(out)
-    assert any('forecast' in h or 'value' in h for h in hdr)
-    assert len(rows) >= 4
+    import numpy as _np
+    arr = _np.array([1.0, 2.0, 3.0], dtype=_np.float32)
+    out = mr.run_pysteps(arr, horizon=4)
+    assert isinstance(out, _np.ndarray)
+    assert out.shape[0] >= 4

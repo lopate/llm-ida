@@ -78,17 +78,7 @@ def run_service(
     choice = safe_choice
 
     # Run the selected model
-    try:
-        # run_model_from_choice expects ModelChoice|str; choice is runtime-dict from selector
-        result = run_model_from_choice(choice, input_data, horizon=horizon, **kwargs)
-    except Exception as exc:
-        logs.append(f'runner_failed:{exc}')
-        result = {
-            'library': choice.get('library') if isinstance(choice, dict) else None,
-            'y_pred': None,
-            'csv': '',
-            'meta': {'horizon': horizon},
-            'error': str(exc),
-        }
+    # run_model_from_choice expects ModelChoice|str; choice is runtime-dict from selector
+    result = run_model_from_choice(choice, input_data, horizon=horizon, **kwargs)
 
     return {'choice': choice, 'result': result, 'logs': logs}

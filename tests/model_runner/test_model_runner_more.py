@@ -7,12 +7,12 @@ from app import model_runner
 
 
 def test_run_pysteps_fallback_with_invalid_csv():
-    # invalid CSV -> fallback persistence behavior
-    csv = "not,a,real,csv"
-    out = model_runner.run_pysteps(csv, horizon=2)
-    assert isinstance(out, str)
-    # returns CSV header and rows
-    assert 'horizon' in out
+    # array input -> expect array output (array-first API)
+    import numpy as _np
+    arr = _np.array([0.0, 1.0, 2.0], dtype=_np.float32)
+    out = model_runner.run_pysteps(arr, horizon=2)
+    assert isinstance(out, _np.ndarray)
+    assert out.shape[0] >= 2
 
 
 def test_run_sktime_naive_multinode():
@@ -41,8 +41,7 @@ def test_run_tslearn_fallback_to_sklearn(monkeypatch):
 
 
 def test_run_sktime_empty_series_fallback():
-    # empty CSV
-    csv = "t,value\n"
-    res = model_runner.run_sktime(csv, horizon=2)
-    assert isinstance(res, str)
-    assert 'horizon' in res
+    # empty array input -> expect ValueError for empty series (strict array-first contract)
+    import numpy as _np
+    with pytest.raises(ValueError):
+        model_runner.run_sktime(_np.array([], dtype=_np.float32), horizon=2)

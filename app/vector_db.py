@@ -23,16 +23,28 @@ DEFAULT_DOCS = [
         'description': 'Persistence and optical-flow based nowcasting for radar/gridded fields; fast, low-latency classical nowcasting. Example usage: load radar grid, apply advection/optical-flow, extrapolate frames for short horizons. Good for sub-hour nowcasts where motion dominates.'
     },
     {
-        'id': 'sktime_autoarima',
-        'model_name': 'AutoARIMA',
+        'id': 'statsforecast_autoarima',
+        'model_name': 'StatsForecastAutoARIMA',
+        'library': 'statsforecast',
+        'description': 'Automatic ARIMA model selection and forecasting for univariate time series using the statsforecast backend. Usage: fit StatsForecastAutoARIMA on each sensor series for fast, scalable ARIMA forecasts with seasonal adjustments; reliable baseline for hourly/daily seasonal series.'
+    },
+    {
+        'id': 'sktime_autoets',
+        'model_name': 'AutoETS',
         'library': 'sktime',
-        'description': 'Automatic ARIMA model selection and forecasting for univariate time series. Usage: fit AutoARIMA on each sensor series, forecast with seasonal adjustments; reliable baseline for hourly/daily seasonal series.'
+        'description': 'Automatic ETS (error-trend-seasonality) modelling for univariate series. AutoETS selects an exponential smoothing state space model automatically and is a robust baseline for seasonal/time-series exhibiting trend and/or multiplicative seasonality.'
     },
     {
         'id': 'sktime_forest',
         'model_name': 'forest',
         'library': 'sktime',
         'description': 'ReducedRegressionForecaster using RandomForestRegressor. Usage: reduce multivariate/time-window into feature vectors per timestep and train RandomForest; handles nonlinearities and is robust to missing values.'
+    },
+    {
+        'id': 'sktime_naive',
+        'model_name': 'naive',
+        'library': 'sktime',
+        'description': 'Simple persistence / last-value forecaster (naive). Fast baseline that repeats the last observed value for the forecast horizon; useful as a lightweight fallback when data is sparse or complex models are unavailable.'
     },
     {
         'id': 'tslearn_knn',

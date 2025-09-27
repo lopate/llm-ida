@@ -8,3 +8,4 @@ torch-geometric
 pytest
 sentence-transformers
 faiss-cpu
+pmdarima

@@ -8,9 +8,13 @@
     "model_name": "AutoARIMA"
   },
   "uni_pred_shape": [
-    12
+    12,
+    1,
+    1
   ],
   "sensors_pred_shape": [
-    8
+    8,
+    16,
+    1
   ]
 }

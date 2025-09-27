@@ -1,5 +1,14 @@
 Metadata-Version: 2.4
-Name: llm-ida
+Name: llm_ida
 Version: 0.0.0
-Summary: ML service for spatio-temporal time series (dev editable install)
 Author: 
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: transformers
+Requires-Dist: torch
+Requires-Dist: sktime
+Requires-Dist: tslearn
+Requires-Dist: torch-geometric
+Requires-Dist: pytest
+Requires-Dist: sentence-transformers
+Requires-Dist: faiss-cpu

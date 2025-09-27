@@ -12,8 +12,12 @@ def make_forecaster(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
 
     This is a thin wrapper used by `run_sktime` and is convenient to patch in tests.
     """
+    import re
     args = args or {}
-    name_l = (name or 'naive').lower()
+    # normalize name: lowercase and strip non-alphanumeric so values like
+    # 'AutoARIMA', 'auto_arima', 'auto-arima' all map to the same key
+    raw = (name or 'naive')
+    name_l = re.sub(r'[^a-z0-9]', '', str(raw).lower())
     try:
         # try importing sktime modules but we will avoid using NaiveForecaster
         # directly because it emits a FutureWarning during concatenation in some versions.
@@ -31,7 +35,8 @@ def make_forecaster(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
 
         return Simple()
 
-    if name_l in ('naive', 'last'):
+    # map persistence -> naive forecaster (used by DEFAULT_DOCS)
+    if name_l in ('naive', 'last', 'persistence'):
         # use a tiny, stable local forecaster to avoid sktime internal warnings
         class Simple:
             def fit(self, y: Any) -> Any:
@@ -53,30 +58,23 @@ def make_forecaster(name: str, args: Optional[Dict[str, Any]] = None) -> Any:
                 return _np.array([last for _ in range(len(fh))], dtype=_np.float32)
 
         return Simple()
+    
+    if name_l in ('autoarima', 'arima', 'statsforecast_autoarima', 'statsforecastautoarima'):
+        from sktime.forecasting.statsforecast import StatsForecastAutoARIMA  # type: ignore
+        return StatsForecastAutoARIMA(**args) if args and len(args) > 0 else StatsForecastAutoARIMA()
 
-    if name_l in ('autoarima', 'arima', 'auto_arima'):
-        try:
-            from sktime.forecasting.arima import AutoARIMA  # type: ignore
-            return AutoARIMA(**args) if args else AutoARIMA()
-        except Exception:
-            return make_forecaster('naive')
 
-    if name_l in ('autoets', 'ets', 'auto_ets'):
-        try:
-            from sktime.forecasting.ets import AutoETS  # type: ignore
-            return AutoETS(**args) if args else AutoETS()
-        except Exception:
-            return make_forecaster('naive')
+    if name_l in ('autoets', 'ets'):
+        from sktime.forecasting.ets import AutoETS  # type: ignore
+        return AutoETS(**args) if args and len(args) > 0 else AutoETS()
 
+    # accept 'forest' as well as potential DEFAULT_DOCS value 'forest'
     if name_l in ('forest', 'randomforest', 'rf'):
-        try:
-            from sktime.forecasting.compose import ReducedRegressionForecaster
-            from sklearn.ensemble import RandomForestRegressor
-            n_est = int(args.get('n_estimators', 50)) if isinstance(args, dict) else 50
-            reg = RandomForestRegressor(n_estimators=n_est)
-            return ReducedRegressionForecaster(regressor=reg)
-        except Exception:
-            return make_forecaster('naive')
+        from sktime.forecasting.compose import ReducedRegressionForecaster
+        from sklearn.ensemble import RandomForestRegressor
+        n_est = int(args.get('n_estimators', 50)) if isinstance(args, dict) else 50
+        reg = RandomForestRegressor(n_estimators=n_est)
+        return ReducedRegressionForecaster(regressor=reg)
 
     # default: return a simple stable forecaster
     class SimpleDefault:
@@ -164,7 +162,7 @@ def _to_csv(header: List[str], rows: List[List[Any]]) -> str:
     return buf.getvalue()
 
 
-def run_pysteps(csv_text: str, **kwargs: Any) -> str:
+def run_pysteps(data: Any, **kwargs: Any) -> ArrayND:
     """Adapter for PySTEPS-like nowcasting.
 
     Attempt to use `pysteps` if installed to run a simple extrapolation (persistence
@@ -172,11 +170,18 @@ def run_pysteps(csv_text: str, **kwargs: Any) -> str:
     persistence-based mock: repeat the last timestep for the forecast horizon.
     """
     horizon = int(kwargs.get('horizon', 3))
-    # try to parse CSV into a 2D array (T, N) or 3D (T,N,F)
-    try:
-        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
-    except Exception:
-        arr = None
+    # accept either CSV text (legacy) or numpy-like array
+    arr: Optional[ArrayND]
+    if isinstance(data, str):
+        try:
+            arr = _csv_to_array(data)  # type: ignore[arg-type]
+        except Exception:
+            arr = None
+    else:
+        try:
+            arr = np.asarray(data)
+        except Exception:
+            arr = None
 
     # If pysteps is available, try a very small pipeline: use persistence or simple extrap
     try:
@@ -188,18 +193,15 @@ def run_pysteps(csv_text: str, **kwargs: Any) -> str:
                 # We will use a trivial persistence: copy last frame for each horizon step
                 if isinstance(arr, _np.ndarray) and arr.ndim >= 2:
                     last = arr[-1]
-                    out_rows = []
+                    if last.ndim == 1:
+                        vals = np.asarray(last, dtype=np.float32)
+                    else:
+                        vals = np.asarray(last[:, 0] if last.ndim >= 2 else last.ravel(), dtype=np.float32)
+                    N = int(vals.shape[0])
+                    out = _np.zeros((horizon, N), dtype=_np.float32)
                     for i in range(horizon):
-                        # flatten per-node values if needed
-                        if last.ndim == 1:
-                            vals = last.tolist()
-                        else:
-                            # take first feature channel
-                            vals = (last[:, 0] if last.ndim >= 2 else last.ravel()).tolist()
-                        # produce one row per node
-                        for n, v in enumerate(vals):
-                            out_rows.append([i + 1, n, float(v)])
-                    return _to_csv(["horizon", "node", "forecast"], out_rows)
+                        out[i, :] = vals
+                    return out
         except Exception:
             # if pysteps import fails or motion API missing, proceed to fallback below
             pass
@@ -207,31 +209,28 @@ def run_pysteps(csv_text: str, **kwargs: Any) -> str:
         # if any import-time error, fall back
         pass
 
-    # final fallback: persistence / repeat last seen value
-    lines = [r for r in csv_text.splitlines() if r.strip()]
-    header = lines[0].split(",") if lines else ["t", "value"]
-    vals = []
-    for line in lines[1:]:
-        parts = line.split(",")
-        try:
-            vals.append(float(parts[-1]))
-        except Exception:
-            pass
-    last = vals[-1] if vals else 0.0
-    out_rows = []
-    for i in range(horizon):
-        out_rows.append([i + 1, last])
-    # choose header depending on whether node information exists
-    if len(header) >= 3 and header[1].lower() in ('node', 'station'):
-        # cannot recover node mapping from the flattened fallback; provide generic rows
-        rows = []
-        for i in range(horizon):
-            rows.append([i + 1, 0, float(last)])
-        return _to_csv(["horizon", "node", "forecast"], rows)
-    return _to_csv(["horizon", "forecast"], out_rows)
+    # final fallback: try to use any numeric values from data and repeat last
+    try:
+        if isinstance(arr, _np.ndarray) and arr.size > 0:
+            # take last value(s)
+            if arr.ndim == 1:
+                last = float(arr[-1])
+                return _np.full((horizon,), last, dtype=_np.float32)
+            elif arr.ndim >= 2:
+                last_vals = arr.reshape((arr.shape[0], -1))[-1]
+                vals = np.asarray(last_vals, dtype=_np.float32)
+                N = int(vals.shape[0])
+                out = _np.zeros((horizon, N), dtype=_np.float32)
+                for i in range(horizon):
+                    out[i, :] = vals
+                return out
+    except Exception:
+        pass
+    # ultimate fallback scalar
+    return _np.zeros((horizon,), dtype=_np.float32)
 
 
-def run_sktime(csv_text: str, *args: Any, **kwargs: Any) -> str:
+def run_sktime(data: Any, *args: Any, **kwargs: Any) -> ArrayND:
     """Real sktime adapter: fits a simple forecaster per-node and returns CSV.
 
     Accepts `csv_text` produced by `_to_csv_for_runner` (or raw CSV). If `sktime`
@@ -253,112 +252,90 @@ def run_sktime(csv_text: str, *args: Any, **kwargs: Any) -> str:
         except Exception:
             pass
 
-    # parse CSV into numpy array if possible
+    # accept CSV text (legacy) or numpy-like array
     try:
-        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
+        if isinstance(data, str):
+            arr = _csv_to_array(data)  # type: ignore[arg-type]
+        else:
+            arr = np.asarray(data)
     except Exception:
         arr = None
 
     # try to use sktime if available, but avoid importing sktime internals unconditionally
-    try:
-        import numpy as _np
-        import pandas as pd
 
-        # delegate forecaster construction to module-level factory so it can be patched in tests
-        # make_forecaster will provide a lightweight local forecaster for 'naive' strategy
-        def _apply_forecaster(series: Any, forecaster: Any) -> ArrayND:
-            """Fit forecaster and return 1D numpy predictions."""
-            forecaster.fit(series)
-            # try numeric fh first (many simple forecasters accept array-like)
-            fh_try = _np.arange(1, horizon + 1)
+    import numpy as _np
+    import pandas as pd
+
+    # delegate forecaster construction to module-level factory so it can be patched in tests
+    # make_forecaster will provide a lightweight local forecaster for 'naive' strategy
+    def _apply_forecaster(series: Any, forecaster: Any) -> ArrayND:
+        """Fit forecaster and return 1D numpy predictions."""
+        forecaster.fit(series)
+        # try numeric fh first (many simple forecasters accept array-like)
+        fh_try = _np.arange(1, horizon + 1)
+        try:
+            pred = forecaster.predict(fh_try)
+            # if returns pandas/np array-like
             try:
-                pred = forecaster.predict(fh_try)
-                # if returns pandas/np array-like
+                return _np.asarray(pred).ravel()
+            except Exception:
+                return _np.array(pred)
+        except Exception:
+            # fallback: import ForecastingHorizon if available and try again
+            try:
+                from sktime.forecasting.base import ForecastingHorizon
+                fh = ForecastingHorizon(_np.arange(1, horizon + 1), is_relative=True)
+                pred = forecaster.predict(fh)
                 try:
                     return _np.asarray(pred).ravel()
                 except Exception:
                     return _np.array(pred)
             except Exception:
-                # fallback: import ForecastingHorizon if available and try again
-                try:
-                    from sktime.forecasting.base import ForecastingHorizon
-                    fh = ForecastingHorizon(_np.arange(1, horizon + 1), is_relative=True)
-                    pred = forecaster.predict(fh)
-                    try:
-                        return _np.asarray(pred).ravel()
-                    except Exception:
-                        return _np.array(pred)
-                except Exception:
-                    # cannot use this forecaster
-                    raise
+                # cannot use this forecaster
+                raise
 
-        # if arr is 1D (univariate series)
-        if isinstance(arr, _np.ndarray) and arr.ndim == 1:
-            y = pd.Series(arr).dropna()
-            # if series is empty after dropping NA, fall back to mock
-            if y.empty:
-                raise ValueError("empty series")
+    # if arr is 1D (univariate series)
+    if isinstance(arr, _np.ndarray) and arr.ndim == 1:
+        y = pd.Series(arr).dropna()
+        # if series is empty after dropping NA, fall back to mock
+        if y.empty:
+            raise ValueError("empty series")
+        forecaster = make_forecaster(model_name, model_args)
+        pred = _apply_forecaster(y, forecaster)
+        return np.asarray(pred, dtype=np.float32)
+
+    # 3D case (T, N, F): treat as spatio-temporal with nodes in axis 1
+    if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
+        _T, N = int(arr.shape[0]), int(arr.shape[1])
+        out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
+        for n in range(N):
+            series = pd.Series(arr[:, n, 0]).dropna()
+            if series.empty:
+                out[:, n] = _np.full((horizon,), 0.0, dtype=_np.float32)
+                continue
             forecaster = make_forecaster(model_name, model_args)
-            pred = _apply_forecaster(y, forecaster)
-            rows = [[i + 1, float(pred[i])] for i in range(len(pred))]
-            return _to_csv(["horizon", "forecast"], rows)
+            pred = _apply_forecaster(series, forecaster)
+            out[:, n] = pred
+        return out
 
-        # 3D case (T, N, F): treat as spatio-temporal with nodes in axis 1
-        if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
-            _T, N = int(arr.shape[0]), int(arr.shape[1])
-            out: ArrayND = _np.zeros((horizon, N, 1), dtype=_np.float32)
-            for n in range(N):
-                series = pd.Series(arr[:, n, 0]).dropna()
-                if series.empty:
-                    out[:, n, 0] = _np.full((horizon,), 0.0, dtype=_np.float32)
-                    continue
-                forecaster = make_forecaster(model_name, model_args)
-                pred = _apply_forecaster(series, forecaster)
-                out[:, n, 0] = pred
-            rows = []
-            for h in range(horizon):
-                for n in range(N):
-                    rows.append([h + 1, n, float(out[h, n, 0])])
-            return _to_csv(["horizon", "node", "forecast"], rows)
-
-        # if arr is 2D treat as (T, features)
-        if isinstance(arr, _np.ndarray) and arr.ndim == 2:
-            _T, N = int(arr.shape[0]), int(arr.shape[1])
-            out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
-            for n in range(N):
-                series = pd.Series(arr[:, n]).dropna()
-                if series.empty:
-                    # fallback to last-value repetition for this node
-                    out[:, n] = _np.full((horizon,), 0.0, dtype=_np.float32)
-                    continue
-                forecaster = make_forecaster(model_name, model_args)
-                pred = _apply_forecaster(series, forecaster)
-                out[:, n] = pred
-            rows = []
-            for h in range(horizon):
-                for n in range(N):
-                    rows.append([h + 1, n, float(out[h, n])])
-            return _to_csv(["horizon", "node", "forecast"], rows)
-
-    except Exception:
-        # fall back to mock behavior below
-        pass
-
-    # if sktime not available or parsing failed, use simple mock behavior
-    lines: List[str] = [line for line in csv_text.splitlines() if line.strip()]
-    vals = []
-    for line in lines[1:]:
-        parts = line.split(",")
-        try:
-            vals.append(float(parts[-1]))
-        except Exception:
-            pass
-    mean = sum(vals)/len(vals) if vals else 0.0
-    rows = [[i+1, mean] for i in range(horizon)]
-    return _to_csv(["horizon","forecast"], rows)
+    # if arr is 2D treat as (T, features)
+    if isinstance(arr, _np.ndarray) and arr.ndim == 2:
+        _T, N = int(arr.shape[0]), int(arr.shape[1])
+        out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
+        for n in range(N):
+            series = pd.Series(arr[:, n]).dropna()
+            if series.empty:
+                # fallback to last-value repetition for this node
+                out[:, n] = _np.full((horizon,), 0.0, dtype=_np.float32)
+                continue
+            forecaster = make_forecaster(model_name, model_args)
+            pred = _apply_forecaster(series, forecaster)
+            out[:, n] = pred
+        return out
 
 
-def run_tslearn(csv_text: str, **kwargs: Any) -> str:
+
+def run_tslearn(data: Any, **kwargs: Any) -> ArrayND:
     """tslearn adapter with sliding-window KNN fallback.
 
     Attempts to use `tslearn` neighbor regressor if available; otherwise
@@ -377,9 +354,12 @@ def run_tslearn(csv_text: str, **kwargs: Any) -> str:
     n_neighbors = int(model_args.get('n_neighbors', 5))
     window_size = int(model_args.get('window_size', 10))
 
-    # parse input into numpy array if possible
+    # accept CSV text (legacy) or numpy array
     try:
-        arr: Optional[ArrayND] = _csv_to_array(csv_text)  # type: ignore[arg-type]
+        if isinstance(data, str):
+            arr = _csv_to_array(data)  # type: ignore[arg-type]
+        else:
+            arr = np.asarray(data)
     except Exception:
         arr = None
 
@@ -451,11 +431,10 @@ def run_tslearn(csv_text: str, **kwargs: Any) -> str:
 
     # Now build outputs depending on arr shape
     try:
-        # 1D series
+        # 1D series -> return (H,) array
         if isinstance(arr, _np.ndarray) and arr.ndim == 1:
             pred = _predict_series_knn(arr)
-            rows = [[i + 1, float(pred[i])] for i in range(len(pred))]
-            return _to_csv(["horizon", "forecast"], rows)
+            return np.asarray(pred, dtype=np.float32)
 
         # 2D: treat as (T, N) -> nodes in columns
         if isinstance(arr, _np.ndarray) and arr.ndim == 2:
@@ -464,252 +443,316 @@ def run_tslearn(csv_text: str, **kwargs: Any) -> str:
             for n in range(N):
                 series = arr[:, n]
                 out[:, n] = _predict_series_knn(series)
-            rows = []
-            for h in range(horizon):
-                for n in range(N):
-                    rows.append([h + 1, n, float(out[h, n])])
-            return _to_csv(["horizon", "node", "forecast"], rows)
+            return out
 
         # 3D: (T, N, F)
         if isinstance(arr, _np.ndarray) and arr.ndim >= 3:
             N = int(arr.shape[1])
-            out: ArrayND = _np.zeros((horizon, N, 1), dtype=_np.float32)
+            out: ArrayND = _np.zeros((horizon, N), dtype=_np.float32)
             for n in range(N):
                 series = arr[:, n, 0]
-                out[:, n, 0] = _predict_series_knn(series)
-            rows = []
-            for h in range(horizon):
-                for n in range(N):
-                    rows.append([h + 1, n, float(out[h, n, 0])])
-            return _to_csv(["horizon", "node", "forecast"], rows)
+                out[:, n] = _predict_series_knn(series)
+            return out
     except Exception:
         # fall through to simple fallback
         pass
 
-    # final fallback: median-based simple output similar to previous mock
-    lines = [line for line in csv_text.splitlines() if line.strip()]
-    vals = []
-    for line in lines[1:]:
-        try:
-            vals.append(float(line.split(",")[-1]))
-        except Exception:
-            pass
-    vals.sort()
-    med = vals[len(vals)//2] if vals else 0.0
-    rows = [[i + 1, med] for i in range(horizon)]
-    return _to_csv(["horizon", "forecast"], rows)
+    # final fallback: try to use numeric content of arr
+    try:
+        if isinstance(arr, _np.ndarray) and arr.size > 0:
+            if arr.ndim == 1:
+                last = float(arr[-1])
+                return _np.full((horizon,), last, dtype=_np.float32)
+            else:
+                last_vals = arr.reshape((arr.shape[0], -1))[-1]
+                vals = np.asarray(last_vals, dtype=_np.float32)
+                N = int(vals.shape[0])
+                out = _np.zeros((horizon, N), dtype=_np.float32)
+                for i in range(horizon):
+                    out[i, :] = vals
+                return out
+    except Exception:
+        pass
+    return _np.zeros((horizon,), dtype=_np.float32)
 
 
-def run_torch_geometric(csv_text: str, **kwargs: Any) -> str:
-    """Adapter for graph-based models (torch_geometric).
+def run_torch_geometric(data: Any, **kwargs: Any) -> ArrayND:
+    """Array-first adapter for simple graph-based forecasts.
 
-    Attempt to construct a simple graph-based prediction if `torch_geometric` is
-    installed: build a small PyTorch model that averages neighbor values (if edge
-    information is provided), or else fall back to a simple linear extrapolation
-    per-node using the last two timesteps.
-    
-    The function expects CSV text produced by `_to_csv_from_array` (t,node,value)
-    or similar. If no node/edge info is available, it falls back to per-node
-    linear extrapolation.
+    Returns numpy arrays of shape (H,) or (H, N). Accepts either a numpy-like
+    array (preferred) or CSV text (legacy). Attempts a tiny GCN-based inference
+    if torch and torch_geometric are available; otherwise falls back to simple
+    per-node linear extrapolation using the last two timesteps.
     """
     horizon = int(kwargs.get('horizon', 3))
+
+    # accept CSV text (legacy) or array
     try:
-        arr = _csv_to_array(csv_text)
+        if isinstance(data, str):
+            arr = _csv_to_array(data)
+        else:
+            arr = np.asarray(data)
     except Exception:
         arr = None
 
     import numpy as _np
-
-    # allow passing model-specific args via kwargs (e.g. train flags, lr)
     model_args = kwargs.get('model_args') or {}
-
-    # If torch_geometric and torch are available, try a minimal neighbor-averaging model.
-    # allow caller to provide explicit edge_index via kwargs (list/array of pairs)
     edge_index_kw = kwargs.get('edge_index', None)
 
+    # Try torch_geometric path
     try:
         import torch
-        try:
-            # Try a small GCN-based inference if torch_geometric is present
-            from torch_geometric.nn import GCNConv
-
-            if isinstance(arr, _np.ndarray) and arr.ndim >= 2:
-                T = arr.shape[0]
-                if arr.ndim == 3:
-                    N = arr.shape[1]
-                    last = arr[-1, :, 0]
-                    prev = arr[-2, :, 0] if T >= 2 else last
-                elif arr.ndim == 2:
-                    N = arr.shape[1]
-                    last = arr[-1, :]
-                    prev = arr[-2, :] if T >= 2 else last
-                else:
-                    last = arr[-1]
-                    prev = arr[-2] if T >= 2 else last
-
-                if isinstance(last, _np.ndarray) and last.size > 1:
-                    # Use provided edge_index if given, otherwise build a simple fully-connected graph
-                    if edge_index_kw is not None:
-                        try:
-                            ei = edge_index_kw
-                            import numpy as _np_local
-                            if isinstance(ei, _np_local.ndarray):
-                                ei_arr = ei
-                            else:
-                                ei_arr = _np_local.asarray(ei)
-                            # expect shape (2, E) or (E, 2)
-                            if ei_arr.ndim == 2 and ei_arr.shape[0] == 2:
-                                edge_index = torch.tensor(ei_arr, dtype=torch.long)
-                            elif ei_arr.ndim == 2 and ei_arr.shape[1] == 2:
-                                edge_index = torch.tensor(ei_arr.T, dtype=torch.long)
-                            else:
-                                edge_index = None
-                        except Exception:
-                            edge_index = None
-                    else:
-                        row = []
-                        col = []
-                        for i in range(N):
-                            for j in range(N):
-                                if i != j:
-                                    row.append(i)
-                                    col.append(j)
-                        edge_index = torch.tensor([row, col], dtype=torch.long) if row else torch.empty((2,0), dtype=torch.long)
-
-                    x = torch.tensor(last.reshape(-1, 1), dtype=torch.float32)
-                    # if requested, perform a small CPU-only training loop
-                    do_train = bool(kwargs.get('train', False) or (isinstance(model_args, dict) and model_args.get('train', False)))
-                    if do_train:
-                        # training hyperparameters
-                        epochs = int(model_args.get('train_epochs', 5)) if isinstance(model_args, dict) else 5
-                        lr = float(model_args.get('lr', 0.01)) if isinstance(model_args, dict) else 0.01
-                        window = int(model_args.get('window_size', 1)) if isinstance(model_args, dict) else 1
-
-                        # prepare simple dataset: for each t in [window, T-1) use last value as feature and next value as target
-                        X_samples = []
-                        Y_samples = []
-                        for t_idx in range(window, T):
-                            # feature: previous value at t_idx-1
-                            feat = arr[t_idx - 1, :, 0]
-                            tgt = arr[t_idx, :, 0]
-                            X_samples.append(feat.reshape(-1, 1))
-                            Y_samples.append(tgt)
-
-                        if X_samples:
-                            import torch.nn as nn
-                            conv = GCNConv(1, 16)
-                            readout = nn.Linear(16, 1)
-                            params = list(conv.parameters()) + list(readout.parameters())
-                            opt = torch.optim.Adam(params, lr=lr)
-                            loss_fn = nn.MSELoss()
-                            # training loop
-                            for ep in range(epochs):
-                                total_loss = 0.0
-                                for xi, yi in zip(X_samples, Y_samples):
-                                    x_in = torch.tensor(xi, dtype=torch.float32)
-                                    y_true = torch.tensor(yi, dtype=torch.float32)
-                                    opt.zero_grad()
-                                    try:
-                                        out = conv(x_in, edge_index) if edge_index is not None else conv(x_in, torch.empty((2,0), dtype=torch.long))
-                                    except Exception:
-                                        out = conv(x_in, torch.empty((2,0), dtype=torch.long))
-                                    h = torch.relu(out)
-                                    pred = readout(h).squeeze()
-                                    loss = loss_fn(pred, y_true)
-                                    loss.backward()
-                                    opt.step()
-                                    total_loss += float(loss.item())
-                                # optional: print progress small-scale
-                                # print(f"epoch {ep+1}/{epochs} loss={total_loss:.6f}")
-
-                            # after training, produce prediction using last observed features
-                            x_last = torch.tensor(last.reshape(-1, 1), dtype=torch.float32)
-                            try:
-                                out = conv(x_last, edge_index) if edge_index is not None else conv(x_last, torch.empty((2,0), dtype=torch.long))
-                            except Exception:
-                                out = conv(x_last, torch.empty((2,0), dtype=torch.long))
-                            h = torch.relu(out)
-                            pred_out = readout(h).squeeze().detach().numpy()
-                            # build multi-horizon by simple extrapolation using delta and GCN output
-                            delta = (last - prev)
-                            preds = []
-                            for h_idx in range(horizon):
-                                step = pred_out + (h_idx) * delta
-                                for n in range(N):
-                                    preds.append([h_idx + 1, n, float(step[n])])
-                            return _to_csv(["horizon", "node", "forecast"], preds)
-
-                    # inference-only path (no training requested)
-                    conv = GCNConv(1, 1)
-                    with torch.no_grad():
-                        try:
-                            out = conv(x, edge_index) if edge_index is not None else conv(x, torch.empty((2,0), dtype=torch.long))
-                        except Exception:
-                            out = None
-                    neigh = out.squeeze().numpy() if out is not None else last
-                    delta = (last - prev)
-                    preds = []
-                    for h in range(horizon):
-                        step = last + (h + 1) * delta + 0.05 * neigh
-                        for n in range(N):
-                            preds.append([h + 1, n, float(step[n])])
-                    return _to_csv(["horizon", "node", "forecast"], preds)
-        except Exception:
-            # torch_geometric/GCNConv not available or failed: fall through
-            pass
-    except Exception:
-        # torch not installed
-        pass
-    except Exception:
-        # torch not installed
-        pass
-
-    # fallback: simple linear extrapolation per-node using last two values
-    lines = [line for line in csv_text.splitlines() if line.strip()]
-    vals_by_node = {}
-    for line in lines[1:]:
-        parts = line.split(',')
-        if len(parts) >= 3:
-            try:
-                node = int(parts[1])
-                v = float(parts[-1])
-            except Exception:
-                continue
-            vals_by_node.setdefault(node, []).append(v)
-
-    rows = []
-    for h in range(horizon):
-        for node, vals in sorted(vals_by_node.items()):
-            if len(vals) >= 2:
-                delta = vals[-1] - vals[-2]
+        from torch_geometric.nn import GCNConv
+        if isinstance(arr, _np.ndarray) and arr.size > 0:
+            T = arr.shape[0]
+            # normalize to last and prev vectors
+            if arr.ndim == 3:
+                N = arr.shape[1]
+                last = arr[-1, :, 0]
+                prev = arr[-2, :, 0] if T >= 2 else last
+            elif arr.ndim == 2:
+                N = arr.shape[1]
+                last = arr[-1, :]
+                prev = arr[-2, :] if T >= 2 else last
             else:
-                delta = 0.0
-            pred = (vals[-1] if vals else 0.0) + (h + 1) * delta
-            rows.append([h + 1, node, float(pred)])
-    if rows:
-        return _to_csv(["horizon", "node", "forecast"], rows)
+                last = arr[-1]
+                prev = arr[-2] if T >= 2 else last
 
-    # ultimate fallback: scalar extrapolation
-    vals = []
-    for line in lines[1:]:
-        try:
-            vals.append(float(line.split(',')[-1]))
-        except Exception:
-            pass
-    if len(vals) >= 2:
-        delta = vals[-1] - vals[-2]
-    else:
-        delta = 0.0
-    rows = [[i + 1, (vals[-1] if vals else 0.0) + (i + 1) * delta] for i in range(horizon)]
-    return _to_csv(["horizon", "forecast"], rows)
+            last = np.asarray(last, dtype=_np.float32)
+            prev = np.asarray(prev, dtype=_np.float32)
+
+            if last.size > 1:
+                # build edge_index
+                edge_index = None
+                if edge_index_kw is not None:
+                    try:
+                        ei = edge_index_kw
+                        ei_arr = np.asarray(ei)
+                        if ei_arr.ndim == 2 and ei_arr.shape[0] == 2:
+                            edge_index = torch.tensor(ei_arr, dtype=torch.long)
+                        elif ei_arr.ndim == 2 and ei_arr.shape[1] == 2:
+                            edge_index = torch.tensor(ei_arr.T, dtype=torch.long)
+                    except Exception:
+                        edge_index = None
+                if edge_index is None:
+                    rows = []
+                    cols = []
+                    for i in range(int(last.size)):
+                        for j in range(int(last.size)):
+                            if i != j:
+                                rows.append(i)
+                                cols.append(j)
+                    edge_index = torch.tensor([rows, cols], dtype=torch.long) if rows else torch.empty((2, 0), dtype=torch.long)
+
+                x = torch.tensor(last.reshape(-1, 1), dtype=torch.float32)
+
+                do_train = bool(kwargs.get('train', False) or (isinstance(model_args, dict) and model_args.get('train', False)))
+                if do_train:
+                    epochs = int(model_args.get('train_epochs', 5)) if isinstance(model_args, dict) else 5
+                    lr = float(model_args.get('lr', 0.01)) if isinstance(model_args, dict) else 0.01
+                    window = int(model_args.get('window_size', 1)) if isinstance(model_args, dict) else 1
+
+                    X_samples = []
+                    Y_samples = []
+                    for t_idx in range(window, T):
+                        feat = arr[t_idx - 1, :, 0]
+                        tgt = arr[t_idx, :, 0]
+                        X_samples.append(feat.reshape(-1, 1))
+                        Y_samples.append(tgt)
+
+                    if X_samples:
+                        import torch.nn as nn
+                        conv = GCNConv(1, 16)
+                        readout = nn.Linear(16, 1)
+                        params = list(conv.parameters()) + list(readout.parameters())
+                        opt = torch.optim.Adam(params, lr=lr)
+                        loss_fn = nn.MSELoss()
+                        for ep in range(epochs):
+                            for xi, yi in zip(X_samples, Y_samples):
+                                x_in = torch.tensor(xi, dtype=torch.float32)
+                                y_true = torch.tensor(yi, dtype=torch.float32)
+                                opt.zero_grad()
+                                try:
+                                    out = conv(x_in, edge_index)
+                                except Exception:
+                                    out = conv(x_in, torch.empty((2, 0), dtype=torch.long))
+                                h = torch.relu(out)
+                                pred = readout(h).squeeze()
+                                loss = loss_fn(pred, y_true)
+                                loss.backward()
+                                opt.step()
+
+                        x_last = torch.tensor(last.reshape(-1, 1), dtype=torch.float32)
+                        try:
+                            out = conv(x_last, edge_index)
+                        except Exception:
+                            out = conv(x_last, torch.empty((2, 0), dtype=torch.long))
+                        h = torch.relu(out)
+                        pred_out = readout(h).squeeze().detach().numpy()
+                        delta = (last - prev)
+                        pred_arr = _np.zeros((horizon, int(last.size)), dtype=_np.float32)
+                        for h_idx in range(horizon):
+                            step = pred_out + (h_idx) * delta
+                            pred_arr[h_idx, :] = step
+                        return pred_arr
+
+                # inference-only
+                conv = GCNConv(1, 1)
+                with torch.no_grad():
+                    try:
+                        out = conv(x, edge_index)
+                    except Exception:
+                        out = None
+                neigh = out.squeeze().numpy() if out is not None else last
+                delta = (last - prev)
+                pred_arr = _np.zeros((horizon, int(last.size)), dtype=_np.float32)
+                for h_idx in range(horizon):
+                    step = last + (h_idx + 1) * delta + 0.05 * neigh
+                    pred_arr[h_idx, :] = step
+                return pred_arr
+    except Exception:
+        # torch or torch_geometric not available or failed
+        pass
+
+    # fallback: linear extrapolation per-node using last two values
+    try:
+        if isinstance(arr, _np.ndarray) and arr.size > 0:
+            if arr.ndim == 1:
+                vals = arr.tolist()
+                delta = float(vals[-1]) - float(vals[-2]) if len(vals) >= 2 else 0.0
+                out = _np.array([float(vals[-1] if vals else 0.0) + (i + 1) * delta for i in range(horizon)], dtype=_np.float32)
+                return out
+            else:
+                last = arr.reshape((arr.shape[0], -1))[-1]
+                prev = arr.reshape((arr.shape[0], -1))[-2] if arr.shape[0] >= 2 else last
+                last = np.asarray(last, dtype=_np.float32)
+                prev = np.asarray(prev, dtype=_np.float32)
+                delta = last - prev
+                N = int(last.shape[0])
+                out = _np.zeros((horizon, N), dtype=_np.float32)
+                for h_idx in range(horizon):
+                    out[h_idx, :] = last + (h_idx + 1) * delta
+                return out
+    except Exception:
+        pass
+
+    # ultimate scalar fallback
+    return _np.zeros((horizon,), dtype=_np.float32)
 
 
+
+def _standardize_pred(pred: Any, horizon: Optional[int] = None) -> ArrayND:
+    """Coerce runner output to numpy array with shape (H, N, F).
+
+    Rules:
+    - 0D scalar -> (1,1,1)
+    - 1D (H,) -> (H,1,1)
+    - 2D (H,N) -> (H,N,1)
+    - 3D (H,N,F) -> (H,N,F) (no-op)
+    - If horizon is provided and mismatches, keep returned H when possible.
+    """
+    try:
+        a = np.asarray(pred)
+    except Exception:
+        # non-array-like -> return empty 3D array
+        return np.zeros((0, 0, 1), dtype=np.float32)
+
+    # ensure float32 for consistency with existing runners
+    try:
+        a = a.astype(np.float32)
+    except Exception:
+        a = np.asarray(a, dtype=np.float32)
+
+    if a.ndim == 0:
+        return a.reshape((1, 1, 1))
+    if a.ndim == 1:
+        H = a.shape[0]
+        return a.reshape((H, 1, 1))
+    if a.ndim == 2:
+        H, N = a.shape
+        return a.reshape((H, N, 1))
+    # ndim >= 3: assume (H, N, F) or compatible
+    if a.ndim >= 3:
+        # if extra leading dims exist, try to preserve first three axes
+        return a.reshape((a.shape[0], a.shape[1], a.shape[2]))
+    # fallback
+    return a.reshape((a.shape[0], -1, 1))
+
+
+def _wrap_runner(fn):
+    """Return a wrapper that calls fn and coerces its output to (H,N,F).
+
+    The wrapper accepts the same (data, **kwargs) signature as runners.
+    """
+    def wrapped(data: Any, **kwargs: Any) -> ArrayND:
+        horizon = int(kwargs.get('horizon', 3)) if kwargs is not None else 3
+        out = fn(data, **kwargs)
+        # if runner returned CSV text, parse it first
+        if isinstance(out, str):
+            try:
+                out_arr = _csv_to_array(out)
+            except Exception:
+                out_arr = np.asarray(out)
+        else:
+            out_arr = np.asarray(out)
+        return _standardize_pred(out_arr, horizon=horizon)
+
+    return wrapped
+
+
+# Wrap runners so every runner returns a standardized 3D numpy array (H, N, F)
 RUNNERS = {
-    "pysteps": run_pysteps,
-    "sktime": run_sktime,
-    "tslearn": run_tslearn,
-    "torch_geometric": run_torch_geometric,
+    "pysteps": _wrap_runner(run_pysteps),
+    "sktime": _wrap_runner(run_sktime),
+    "tslearn": _wrap_runner(run_tslearn),
+    "torch_geometric": _wrap_runner(run_torch_geometric),
 }
+
+
+def _array_to_csv(arr: Any) -> str:
+    """Convert numpy array (H,) or (H,N) or (H,N,1) to CSV text with headers.
+
+    - (H,) -> header ['horizon','forecast'] rows (1..H, value)
+    - (H,N) -> header ['horizon','node','forecast'] rows repeated per node
+    - scalar-like or other -> fallback to string
+    """
+    try:
+        a = np.asarray(arr)
+    except Exception:
+        return str(arr)
+    import io as _io
+    import csv as _csv
+    buf = _io.StringIO()
+    writer = _csv.writer(buf)
+    if a.ndim == 1:
+        writer.writerow(['horizon', 'forecast'])
+        for i in range(a.shape[0]):
+            writer.writerow([i + 1, float(a[i])])
+        return buf.getvalue()
+    if a.ndim == 2:
+        H, N = a.shape[0], a.shape[1]
+        writer.writerow(['horizon', 'node', 'forecast'])
+        for h in range(H):
+            for n in range(N):
+                writer.writerow([h + 1, n, float(a[h, n])])
+        return buf.getvalue()
+    if a.ndim >= 3:
+        # take first feature channel
+        H = a.shape[0]
+        N = a.shape[1] if a.ndim >= 2 else 1
+        writer.writerow(['horizon', 'node', 'forecast'])
+        for h in range(H):
+            for n in range(N):
+                try:
+                    v = float(a[h, n, 0])
+                except Exception:
+                    try:
+                        v = float(a[h, n])
+                    except Exception:
+                        v = 0.0
+                writer.writerow([h + 1, n, v])
+        return buf.getvalue()
+    return str(arr)
 
 
 def run_model(lib_name: str, csv_text: str, **kwargs: Any) -> Tuple[str, str]:
@@ -720,68 +763,34 @@ def run_model(lib_name: str, csv_text: str, **kwargs: Any) -> Tuple[str, str]:
     """
     func = RUNNERS.get(lib_name)
     if not func:
-        # fallback to sktime
         func = run_sktime
 
-    # normalize input: accept CSV text or numpy ndarray (T,N,F) or similar
-    def _to_csv_from_array(arr: Any) -> str:
-        if isinstance(arr, str):
-            return arr
-        # try numpy-like
+    # accept array or CSV: callers might pass CSV; convert to array first if needed
+    if isinstance(csv_text, str):
         try:
-            a = np.asarray(arr)
+            arr_in = _csv_to_array(csv_text)
         except Exception:
-            return str(arr)
-        # 3D array: (T, N, F) -> t,node,value
-        if a.ndim >= 3:
-            T_s, N_s = a.shape[0], a.shape[1]
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(['t', 'node', 'value'])
-            for t in range(T_s):
-                for n in range(N_s):
-                    try:
-                        v = float(a[t, n, 0])
-                    except Exception:
-                        v = float(a[t, n]) if a.ndim == 2 else 0.0
-                    writer.writerow([t, n, v])
-            return buf.getvalue()
-        # 2D array: (T, N) -> t,node,value
-        if a.ndim == 2:
-            T_s, N_s = a.shape
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(['t', 'node', 'value'])
-            for t in range(T_s):
-                for n in range(N_s):
-                    try:
-                        v = float(a[t, n])
-                    except Exception:
-                        v = 0.0
-                    writer.writerow([t, n, v])
-            return buf.getvalue()
+            arr_in = csv_text
+    else:
+        arr_in = csv_text
 
-        # 1D array: (T,) -> t,value
-        if a.ndim == 1:
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(['t', 'value'])
-            for i, v in enumerate(a.tolist()):
-                try:
-                    vv = float(v)
-                except Exception:
-                    vv = 0.0
-                writer.writerow([i, vv])
-            return buf.getvalue()
+    # run runner which now returns numpy arrays
+    try:
+        pred_arr = func(arr_in, **kwargs)
+    except Exception:
+        # try legacy CSV-based call
+        try:
+            csv_in = csv_text if isinstance(csv_text, str) else _array_to_csv(csv_text)
+            out_csv = func(csv_in, **kwargs)
+            pred_arr = _csv_to_array(out_csv)
+        except Exception:
+            pred_arr = np.zeros((0,), dtype=np.float32)
 
-        # fallback: represent as string
-        return str(arr)
+    # convert predictions to CSV for backwards compatibility
+    pred_csv = _array_to_csv(pred_arr)
 
-    csv_input = _to_csv_from_array(csv_text)
-    predictions = func(csv_input, **kwargs)
-
-    code = f"# Mock runner for {lib_name}\n" + "def predict(csv_text):\n    # implement model loading and prediction here\n    return '" + predictions.replace("\n", "\\n") + "'\n"
-    return code, predictions
+    code = f"# Mock runner for {lib_name}\n" + "def predict(csv_text):\n    # implement model loading and prediction here\n    return '" + pred_csv.replace("\n", "\\n") + "'\n"
+    return code, pred_csv
 
 
 def _csv_to_array(csv_text: str) -> Union[ArrayND, List[float]]:
@@ -854,10 +863,7 @@ def _csv_to_array(csv_text: str) -> Union[ArrayND, List[float]]:
     # fallback: try single-column time series
     vals = []
     for row in reader:
-        try:
-            vals.append(float(row[-1]))
-        except Exception:
-            pass
+        vals.append(float(row[-1]))
     return np.array(vals, dtype=np.float32)
 
 
@@ -914,38 +920,8 @@ def run_model_from_choice(choice: Union[ModelChoice, str], input_data: Any, hori
         except Exception:
             arr = input_data
 
-    # If arr is multi-dim, convert to CSV for the mock runners
-    def _to_csv_for_runner(a):
-        if isinstance(a, str):
-            return a
-        try:
-            a = np.asarray(a)
-        except Exception:
-            return str(a)
-        if a.ndim >= 3:
-            T_s, N_s = a.shape[0], a.shape[1]
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(['t', 'node', 'value'])
-            for t in range(T_s):
-                for n in range(N_s):
-                    try:
-                        v = float(a[t, n, 0])
-                    except Exception:
-                        v = float(a[t, n]) if a.ndim == 2 else 0.0
-                    writer.writerow([t, n, v])
-            return buf.getvalue()
-        # 1D array -> simple CSV
-        if a.ndim == 1:
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            writer.writerow(['t', 'value'])
-            for i, v in enumerate(a.tolist()):
-                writer.writerow([i, float(v)])
-            return buf.getvalue()
-        return str(a)
-
-    csv_text = _to_csv_for_runner(arr)
+    # arr is already loaded above; pass numpy array directly to runners
+    csv_text = None
 
     # extract model_name and args from choice if present and also from kwargs
     model_name = None
@@ -978,18 +954,18 @@ def run_model_from_choice(choice: Union[ModelChoice, str], input_data: Any, hori
     forward_kwargs['model_name'] = model_name
     forward_kwargs['model_args'] = model_args
 
-    # call runner to get CSV output
-    try:
-        predictions_csv = func(csv_text, **forward_kwargs)
-    except TypeError:
-        # adapter didn't accept kwargs; try calling with minimal signature
-        try:
-            predictions_csv = func(csv_text, model_name=model_name, model_args=model_args, horizon=horizon)
-        except Exception:
-            predictions_csv = func(csv_text)
-    # try to parse CSV into numpy array
-    # predictions_csv may have header like ['horizon','forecast'] or ['time', 'node', ...]
-    pred_arr = _csv_to_array(predictions_csv)
+    # call runner with array input; try array-first API
+
+    csv_in = _array_to_csv(arr)
+    out = func(csv_in, **forward_kwargs)
+    # out may be CSV text or array
+    if isinstance(out, str):
+        pred_arr = _csv_to_array(out)
+    else:
+        pred_arr = np.asarray(out)
+
+
+    predictions_csv = _array_to_csv(pred_arr)
 
     result = {
         'library': lib,
